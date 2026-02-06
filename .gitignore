@@ -215,4 +215,5 @@ __pycache__/
 *.docx
 *.pdf
 *.txt
+!requirements.txt
 
