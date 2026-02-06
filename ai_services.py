@@ -226,3 +226,358 @@ class RealAIService:
         
         content = response.choices[0].message.content
         return json.loads(content)
+
+import vosk
+import json
+import os
+import re
+import wave
+
+class LocalAIService:
+    @staticmethod
+    def transcribe_audio(audio_file) -> str:
+        model_path = "model"
+        if not os.path.exists(model_path):
+             return "Error: Vosk model not found. Please run download_model.py."
+
+        try:
+            from pydub import AudioSegment
+            from pydub.utils import make_chunks
+            import soundfile as sf
+            import io
+            import tempfile
+            
+            model = vosk.Model(model_path)
+            
+            # Read the uploaded audio file
+            # First, save to temporary file for pydub processing
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                audio_file.seek(0)
+                tmp_file.write(audio_file.read())
+            
+            # Load audio with pydub
+            audio = AudioSegment.from_file(tmp_path)
+            
+            # Convert to required format: mono, 16kHz
+            audio = audio.set_channels(1)  # Mono
+            audio = audio.set_frame_rate(16000)  # 16kHz
+            
+            # Split into chunks (30 seconds each = 30000 ms)
+            chunk_length_ms = 30000  # 30 seconds
+            chunks = make_chunks(audio, chunk_length_ms)
+            
+            print(f"Processing audio in {len(chunks)} chunks...")
+            
+            all_transcripts = []
+            
+            # Process each chunk
+            for i, chunk in enumerate(chunks):
+                print(f"Processing chunk {i+1}/{len(chunks)}...")
+                
+                # Export chunk to WAV bytes
+                chunk_io = io.BytesIO()
+                chunk.export(chunk_io, format="wav")
+                chunk_io.seek(0)
+                
+                # Open with wave for Vosk
+                wf = wave.open(chunk_io, "rb")
+                
+                # Create recognizer for this chunk
+                rec = vosk.KaldiRecognizer(model, wf.getframerate())
+                rec.SetWords(True)
+                
+                # Process chunk
+                chunk_results = []
+                while True:
+                    data = wf.readframes(4000)
+                    if len(data) == 0:
+                        break
+                    if rec.AcceptWaveform(data):
+                        part_result = json.loads(rec.Result())
+                        chunk_results.append(part_result.get("text", ""))
+                
+                # Get final result for this chunk
+                part_result = json.loads(rec.FinalResult())
+                chunk_results.append(part_result.get("text", ""))
+                
+                # Combine chunk results
+                chunk_transcript = " ".join([r for r in chunk_results if r])
+                all_transcripts.append(chunk_transcript)
+                
+                wf.close()
+            
+            # Clean up temp file
+            os.unlink(tmp_path)
+            
+            # Combine all chunk transcripts
+            full_transcript = " ".join(all_transcripts)
+            print(f"Transcription complete! Total length: {len(full_transcript)} characters")
+            
+            return full_transcript
+            
+        except Exception as e:
+            return f"Error transcribing with Vosk: {e}"
+
+    @staticmethod
+    def extract_data(transcript: str, scenario="Eligible (Happy Path)") -> dict:
+        # Helper to convert word numbers to digits
+        def word_to_num(text):
+            result = text
+            import re
+            
+            # Handle special patterns like "one eighteen" -> "118", "one twenty" -> "120"
+            result = re.sub(r'\bone eighteen\b', '118', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bone twenty\b', '120', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bone hundred\b', '100', result, flags=re.IGNORECASE)
+            result = re.sub(r'\btwo hundred\b', '200', result, flags=re.IGNORECASE)
+            
+            # Handle "thirty six point eight" -> "36 point 8" -> "36.8"
+            # First handle tens + unit for the integer part
+            for tens_word, tens_val in [('twenty', '2'), ('thirty', '3'), ('forty', '4'), 
+                                          ('fifty', '5'), ('sixty', '6'), ('seventy', '7'),
+                                          ('eighty', '8'), ('ninety', '9')]:
+                for unit_word, unit_val in [('one', '1'), ('two', '2'), ('three', '3'), 
+                                              ('four', '4'), ('five', '5'), ('six', '6'),
+                                              ('seven', '7'), ('eight', '8'), ('nine', '9')]:
+                    pattern = tens_word + r'\s*' + unit_word
+                    replacement = tens_val + unit_val
+                    result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+            
+            # Handle standalone number words
+            word_nums = {
+                'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+                'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+                'ten': '10', 'eleven': '11', 'twelve': '12', 'thirteen': '13',
+                'fourteen': '14', 'fifteen': '15', 'sixteen': '16', 'seventeen': '17',
+                'eighteen': '18', 'nineteen': '19', 'twenty': '20', 'thirty': '30',
+                'forty': '40', 'fifty': '50', 'sixty': '60', 'seventy': '70',
+                'eighty': '80', 'ninety': '90',
+            }
+            for word, val in word_nums.items():
+                result = re.sub(r'\b' + word + r'\b', val, result, flags=re.IGNORECASE)
+            
+            # Handle "X over Y" for BP
+            result = re.sub(r'(\d+)\s+over\s+(\d+)', r'\1/\2', result)
+            
+            # Handle "X point Y" for decimals
+            result = re.sub(r'(\d+)\s+point\s+(\d+)', r'\1.\2', result)
+            
+            return result
+        
+        # Normalize transcript
+        transcript_clean = transcript.replace("subject to", "subject id").replace("slash", "/")
+        transcript_clean = word_to_num(transcript_clean)
+        
+        data = MockAIService.SCENARIOS["Eligible (Happy Path)"]["data"].copy()
+        
+        # Reset specific fields
+        data["medications"] = []
+        data["vitals_pre"] = {}
+        data["injection"] = {}
+        data["last_dose"] = {}
+        
+        # === Extraction Logic ===
+        
+        # Visit Date: "Date 26 January 2026" or "26/01/2026" etc.
+        # Simple extraction for "YYYY-MM-DD" conversion might be complex without a lib, 
+        # so let's capture the string first. The form filler might handle string dates if format matches.
+        # User sample: "26 January 26" -> This could mean 2026.
+        # Let's try to find a date pattern.
+        date_match = re.search(r'(Date|today\'s date)\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE)
+        if date_match:
+             # Basic parsing: "26 January 2026"
+             raw_date = date_match.group(2)
+             # Basic normalization attempt could go here, but passing raw string might be safer for now
+             # if the form filler just puts it in.
+             data["visit_date"] = raw_date
+
+        # Subject ID: "Subject ID 0215 dash 301" or "0215-301"
+        sid_match = re.search(r'Subject ID\s*([\w\d\-\s]+?)(,|\.|Date)', transcript_clean, re.IGNORECASE)
+        if sid_match:
+            sid = sid_match.group(1).replace("dash", "-").replace(" ", "")
+            data["subject_id"] = sid
+
+        # Initials: "Initials A.K." or "initials JK"
+        init_match = re.search(r'Initials\s*([A-Za-z\.]+)', transcript_clean, re.IGNORECASE)
+        if init_match:
+             # We assume there isn't a field in the mock data for initials, but good to extract if needed.
+             pass
+
+        # Age
+        age_match = re.search(r'(\d{2})\s*(years old|yo)', transcript_clean, re.IGNORECASE)
+        if age_match:
+            data["age"] = int(age_match.group(1))
+
+        # HAE Type
+        type_match = re.search(r'Type\s*([12])', transcript_clean, re.IGNORECASE)
+        if type_match:
+            data["hae_type"] = f"Type {type_match.group(1)}"
+        
+        # Meds
+        meds = []
+        if re.search(r'Takhzyro', transcript_clean, re.IGNORECASE):
+            meds.append("Takhzyro")
+        if re.search(r'Orladeyo', transcript_clean, re.IGNORECASE):
+            meds.append("Orladeyo")
+        if re.search(r'Lisinopril', transcript_clean, re.IGNORECASE):
+            meds.append("lisinopril")
+        if meds:
+            data["medications"] = meds
+            
+        if "Takhzyro" in meds:
+             data["last_dose"]["medication"] = "Takhzyro"
+
+        # Vitals extraction with flexible patterns for Vosk output
+        
+        # Weight: "78 kg" or "78 kilograms" or just "78" after weight context
+        w_match = re.search(r'(weight|weigh)\s*(\d{2,3})\s*(kg|kilo|kilogram)?', transcript_clean, re.IGNORECASE)
+        if w_match:
+            data["vitals_pre"]["weight"] = str(w_match.group(2))
+
+        # BP: "118/76" or "118 over 76" (now converted) or "118.76"
+        # Also handle "push you" which Vosk might interpret as "pressure"
+        bp_match = re.search(r'(blood pressure|pressure|push)\s*(\d{2,3})[/\.](\d{2,3})', transcript_clean, re.IGNORECASE)
+        if bp_match:
+            data["vitals_pre"]["bp"] = f"{bp_match.group(2)}/{bp_match.group(3)}"
+        
+        # HR: "72 bpm" or "heart rate 72" or "bpl" (Vosk misheard bpm)
+        hr_match = re.search(r'(heart rate|rate)\s*(\d{2,3})\s*(bpm|bpl|be p m)?', transcript_clean, re.IGNORECASE)
+        if not hr_match:
+            # Try standalone "XX bpm" pattern
+            hr_match = re.search(r'(\d{2,3})\s*(bpm|bpl|be p m)', transcript_clean, re.IGNORECASE)
+            if hr_match:
+                data["vitals_pre"]["hr"] = str(hr_match.group(1))
+        else:
+            data["vitals_pre"]["hr"] = str(hr_match.group(2))
+
+        # Temp: "36.8" or "six point eight" (converted) or "36 point 8"
+        t_match = re.search(r'(temperature|temp)\s*(\d{2})[.\s]*(\d{1,2})?', transcript_clean, re.IGNORECASE)
+        if t_match:
+            temp_val = t_match.group(2)
+            if t_match.group(3):
+                temp_val += "." + t_match.group(3)
+            data["vitals_pre"]["temp"] = temp_val
+
+        # RR: "16 breaths" or "respiratory rate 16"
+        rr_match = re.search(r'(respiratory rate|respiratory|breaths)\s*(\d{2})', transcript_clean, re.IGNORECASE)
+        if not rr_match:
+            rr_match = re.search(r'(\d{2})\s*breaths', transcript_clean, re.IGNORECASE)
+            if rr_match:
+                data["vitals_pre"]["rr"] = str(rr_match.group(1))
+        else:
+            data["vitals_pre"]["rr"] = str(rr_match.group(2))
+        
+        # === Post-Dose Vitals (look for "post" context) ===
+        # Find vitals after "post-dose" or "1 hour post"
+        post_section = re.search(r'(post.?dose|1 hour post)(.*?)($|Notes:|Participant)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if post_section:
+            post_text = post_section.group(2)
+            data["vitals_post"] = {}
+            
+            w_post = re.search(r'Weight\s*(\d{2,3})', post_text, re.IGNORECASE)
+            if w_post:
+                data["vitals_post"]["weight"] = str(w_post.group(1))
+            
+            bp_post = re.search(r'Blood pressure\s*(\d{2,3})[\./](\d{2,3})', post_text, re.IGNORECASE)
+            if bp_post:
+                data["vitals_post"]["bp"] = f"{bp_post.group(1)}/{bp_post.group(2)}"
+            
+            hr_post = re.search(r'Heart rate\s*(\d{2,3})', post_text, re.IGNORECASE)
+            if hr_post:
+                data["vitals_post"]["hr"] = str(hr_post.group(1))
+            
+            t_post = re.search(r'Temperature\s*(\d{2}[\.,]\d{1,2})', post_text, re.IGNORECASE)
+            if t_post:
+                data["vitals_post"]["temp"] = str(t_post.group(1)).replace(",", ".")
+            
+            rr_post = re.search(r'Respiratory rate\s*(\d{2})', post_text, re.IGNORECASE)
+            if rr_post:
+                data["vitals_post"]["rr"] = str(rr_post.group(1))
+
+        # === ECG Extraction ===
+        data["ecg"] = {}
+        ecg_match = re.search(r'ECG.*?Heart rate\s*(\d{2,3})\s*BPM.*?PR\s*(\d{2,3})\s*msec.*?RR\s*(\d{2,4})\s*msec.*?QRS\s*(\d{2,3})\s*msec.*?QT\s*(\d{2,3})\s*msec', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if ecg_match:
+            data["ecg"]["hr"] = ecg_match.group(1)
+            data["ecg"]["pr"] = ecg_match.group(2)
+            data["ecg"]["rr"] = ecg_match.group(3)
+            data["ecg"]["qrs"] = ecg_match.group(4)
+            data["ecg"]["qt"] = ecg_match.group(5)
+        
+        # ECG Result
+        if re.search(r'Result\s*Normal', transcript_clean, re.IGNORECASE):
+            data["ecg"]["result"] = "Normal"
+        
+        # ECG Date
+        ecg_date = re.search(r'ECG.*?Date performed\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if ecg_date:
+            data["ecg"]["date"] = ecg_date.group(1)
+
+        # === Labs Extraction ===
+        data["labs"] = {"collected": True}
+        labs_date = re.search(r'Lab.*?Date collected\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if labs_date:
+            data["labs"]["date"] = labs_date.group(1)
+        
+        labs_time = re.search(r'Lab.*?Time collected\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if labs_time:
+            data["labs"]["time"] = labs_time.group(1)
+        
+        urine_time = re.search(r'Urine collection time\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE)
+        if urine_time:
+            data["labs"]["urine_time"] = urine_time.group(1)
+
+        # === Pregnancy Test Extraction ===
+        data["pregnancy"] = {}
+        preg_potential = re.search(r'childbearing potential\?.*?(Yes|No)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if preg_potential:
+            data["pregnancy"]["potential"] = preg_potential.group(1).capitalize() == "Yes"
+        
+        preg_result = re.search(r'Pregnancy.*?Result\s*(Positive|Negative)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if preg_result:
+            data["pregnancy"]["result"] = preg_result.group(1).capitalize()
+        
+        preg_date = re.search(r'Collection date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE)
+        if preg_date:
+            data["pregnancy"]["date"] = preg_date.group(1)
+        
+        preg_time = re.search(r'Collection time\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE)
+        if preg_time:
+            data["pregnancy"]["time"] = preg_time.group(1)
+
+        # === Injection 1 Extraction ===
+        inj1_match = re.search(r'Injection 1.*?Dose administered\s*(\d+\s*mL).*?Anatomical location\s*(\w+).*?Laterality\s*([\w\s]+?)\.?\s*(Route|Start)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if inj1_match:
+            data["injection"] = {
+                "dose": inj1_match.group(1),
+                "site": inj1_match.group(2),
+                "laterality": inj1_match.group(3).strip()
+            }
+        
+        inj1_time = re.search(r'Injection 1.*?Start time\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if inj1_time and "injection" in data:
+            data["injection"]["start_time"] = inj1_time.group(1)
+        
+        inj1_date = re.search(r'Injection 1.*?Start date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if inj1_date and "injection" in data:
+            data["injection"]["start_date"] = inj1_date.group(1)
+
+        # === Injection 2 Extraction ===
+        inj2_match = re.search(r'Injection 2.*?Dose administered\s*(\d+\s*mL).*?Anatomical location\s*(\w+).*?Laterality\s*([\w\s]+?)\.?\s*(Route|Start)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if inj2_match:
+            data["injection_2"] = {
+                "dose": inj2_match.group(1),
+                "site": inj2_match.group(2),
+                "laterality": inj2_match.group(3).strip()
+            }
+        
+        inj2_time = re.search(r'Injection 2.*?Start time\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if inj2_time and "injection_2" in data:
+            data["injection_2"]["start_time"] = inj2_time.group(1)
+        
+        inj2_date = re.search(r'Injection 2.*?Start date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if inj2_date and "injection_2" in data:
+            data["injection_2"]["start_date"] = inj2_date.group(1)
+            
+        return data

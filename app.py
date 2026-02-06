@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from logic import WashoutCalculator, RuleEngine
-from ai_services import MockAIService, RealAIService
+from ai_services import MockAIService, RealAIService, LocalAIService
 from form_filler import FormFiller
 import os
 
@@ -12,7 +12,7 @@ st.title("Voice-Enabled Eligibility Screening Assistant")
 
 # Sidebar for controls
 st.sidebar.header("Controls")
-mode = st.sidebar.selectbox("Mode", ["Mock Mode", "Live Mode (Requires API Key)"])
+mode = st.sidebar.selectbox("Mode", ["Mock Mode", "Local Mode (No LLM)", "Live Mode (Requires API Key)"])
 
 mock_scenario = "Eligible (Happy Path)"
 if mode == "Mock Mode":
@@ -44,6 +44,16 @@ with col1:
                     transcript = MockAIService.transcribe_audio(None, scenario=mock_scenario)
                 
                 extracted_data = MockAIService.extract_data(transcript, scenario=mock_scenario)
+
+            elif mode == "Local Mode (No LLM)":
+                 # Local Mode execution
+                if uploaded_file.name.endswith(".txt"):
+                    transcript = uploaded_file.read().decode("utf-8")
+                else:
+                    # Audio Input - Use LocalAIService (SpeechRecognition)
+                    transcript = LocalAIService.transcribe_audio(uploaded_file)
+                
+                extracted_data = LocalAIService.extract_data(transcript)
             else:
                 try:
                     service = RealAIService(api_key)
@@ -59,7 +69,7 @@ with col1:
                 except Exception as e:
                     error_str = str(e)
                     if "403" in error_str and "model_not_found" in error_str:
-                        st.error("🚨 Access Denied to 'whisper-1' model.")
+                        st.error(f"🚨 Access Denied to 'whisper-1' model. Details: {e}")
                         st.warning("""
                         **Solution:**
                         1. Go to your OpenAI Dashboard > Settings > Projects.

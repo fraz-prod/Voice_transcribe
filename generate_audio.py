@@ -11,9 +11,11 @@ def generate_silent_wav(filename, duration_sec=3):
         wav_file.setsampwidth(2)
         wav_file.setframerate(sample_rate)
         
-        # Write silence (0)
-        data = struct.pack('<h', 0) * n_frames
-        wav_file.writeframes(data)
+        # Write sine wave (beep)
+        for i in range(n_frames):
+            value = int(32767.0 * math.sin(2.0 * math.pi * 440.0 * i / sample_rate))
+            data = struct.pack('<h', value)
+            wav_file.writeframes(data)
     
     print(f"Generated {filename}")
 

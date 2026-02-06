@@ -4,3 +4,9 @@ openai
 python-dotenv
 pypdf
 python-docx
+vosk
+soundfile
+numpy
+requests
+tqdm
+pydub

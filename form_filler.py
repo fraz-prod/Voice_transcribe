@@ -30,9 +30,22 @@ class FormFiller:
 
         # Helper to fill underscores
         def fill_underscores(paragraph, value: str):
-            if "_____" in paragraph.text:
-                paragraph.text = paragraph.text.replace("__________", str(value), 1)
-                paragraph.text = paragraph.text.replace("_____", str(value), 1)
+            if not value:
+                return
+            text = paragraph.text
+            # Replace various underscore patterns
+            import re
+            text = re.sub(r'_{3,}', str(value), text, count=1)
+            paragraph.text = text
+        
+        # Helper to fill table cell
+        def fill_table_cell(cell, value: str):
+            if not value:
+                return
+            # Modify the first paragraph in the cell
+            if cell.paragraphs:
+                para = cell.paragraphs[0]
+                para.text = para.text + " " + str(value)
 
         # === SECTION 1: Visit Performed ===
         for para in doc.paragraphs:
@@ -121,11 +134,11 @@ class FormFiller:
             if len(doc.tables) > 0:
                 table = doc.tables[0]
                 try:
-                    table.rows[0].cells[0].text += f" {vitals.get('weight', '')}"
-                    table.rows[1].cells[0].text += f" {vitals.get('bp', '')}"
-                    table.rows[2].cells[0].text += f" {vitals.get('hr', '')}"
-                    table.rows[3].cells[0].text += f" {vitals.get('temp', '')}"
-                    table.rows[4].cells[0].text += f" {vitals.get('rr', '')}"
+                    fill_table_cell(table.rows[0].cells[0], vitals.get('weight', ''))
+                    fill_table_cell(table.rows[1].cells[0], vitals.get('bp', ''))
+                    fill_table_cell(table.rows[2].cells[0], vitals.get('hr', ''))
+                    fill_table_cell(table.rows[3].cells[0], vitals.get('temp', ''))
+                    fill_table_cell(table.rows[4].cells[0], vitals.get('rr', ''))
                 except IndexError:
                     pass
 
@@ -150,16 +163,61 @@ class FormFiller:
                 mark_yes_no(para, labs.get("collected", True))
                 break
 
+        # Fill Labs Date/Time
+        labs = data.get("labs", {})
+        for para in doc.paragraphs:
+            if "Date collected?" in para.text:
+                fill_underscores(para, labs.get("date", ""))
+                break
+        
+        for para in doc.paragraphs:
+            if "Time collected?" in para.text:
+                fill_underscores(para, labs.get("time", ""))
+                break
+        
+        for para in doc.paragraphs:
+            if "Urine collection time:" in para.text:
+                fill_underscores(para, labs.get("urine_time", ""))
+                break
+
         for para in doc.paragraphs:
             if "Was Pharmacogenetics (DNA paxgene) sample collected?" in para.text:
                 mark_yes_no(para, False)  # Often not collected
                 break
 
         # === SECTION 13: Childbearing Potential ===
+        pregnancy = data.get("pregnancy", {})
         for para in doc.paragraphs:
             if "Is subject of childbearing potential?" in para.text:
-                mark_yes_no(para, False)  # Happy path: No
+                mark_yes_no(para, pregnancy.get("potential", False))
                 break
+        
+        # If childbearing potential is Yes, fill pregnancy test details
+        if pregnancy.get("potential", False):
+            for para in doc.paragraphs:
+                if "was the sample collected?" in para.text.lower():
+                    mark_yes_no(para, True)
+                    break
+            
+            for para in doc.paragraphs:
+                if "Collection Date:" in para.text:
+                    fill_underscores(para, pregnancy.get("date", ""))
+                    break
+            
+            for para in doc.paragraphs:
+                if "Collection Time:" in para.text:
+                    fill_underscores(para, pregnancy.get("time", ""))
+                    break
+            
+            # Mark pregnancy result
+            for para in doc.paragraphs:
+                if "Results:" in para.text and ("Positive" in para.text or "Negative" in para.text):
+                    result = pregnancy.get("result", "Negative")
+                    if result == "Negative":
+                        para.text = para.text.replace(" Negative", " [X] Negative").replace(" Positive", " [ ] Positive")
+                    else:
+                        para.text = para.text.replace(" Positive", " [X] Positive").replace(" Negative", " [ ] Negative")
+                    break
 
         # === SECTION 14: Investigational Product ===
         for para in doc.paragraphs:
@@ -174,10 +232,29 @@ class FormFiller:
                 if "Dose administered:" in para.text:
                     fill_underscores(para, inj.get("dose", ""))
                     break
-
+            
+            # Laterality checkbox marking
             for para in doc.paragraphs:
-                if "Anatomical Location:" in para.text:
-                    fill_underscores(para, inj.get("site", ""))
+                if "Laterality:" in para.text:
+                    lat = inj.get("laterality", "").lower()
+                    if "left lower" in lat:
+                        para.text = para.text.replace("Left Lower Quadrant", "[X] Left Lower Quadrant")
+                    elif "left upper" in lat:
+                        para.text = para.text.replace("Left Upper Quadrant", "[X] Left Upper Quadrant")
+                    elif "right lower" in lat:
+                        para.text = para.text.replace("Right Lower Quadrant", "[X] Right Lower Quadrant")
+                    elif "right upper" in lat:
+                        para.text = para.text.replace("Right Upper Quadrant", "[X] Right Upper Quadrant")
+                    break
+            
+            for para in doc.paragraphs:
+                if "Start Date:" in para.text:
+                    fill_underscores(para, inj.get("start_date", ""))
+                    break
+            
+            for para in doc.paragraphs:
+                if "Start Time:" in para.text:
+                    fill_underscores(para, inj.get("start_time", ""))
                     break
 
         # Injection 1 Interrupted
@@ -186,17 +263,47 @@ class FormFiller:
                 mark_yes_no(para, False)
                 break
 
+        # === SECTION 15b: Injection 2 Details ===
+        if "injection_2" in data:
+            inj2 = data["injection_2"]
+            # Find Injection 2 section
+            found_inj2 = False
+            for i, para in enumerate(doc.paragraphs):
+                if "Injection 2" in para.text:
+                    found_inj2 = True
+                    continue
+                
+                if found_inj2:
+                    if "Dose administered:" in para.text:
+                        fill_underscores(para, inj2.get("dose", ""))
+                    elif "Laterality:" in para.text:
+                        lat = inj2.get("laterality", "").lower()
+                        if "left lower" in lat:
+                            para.text = para.text.replace("Left Lower Quadrant", "[X] Left Lower Quadrant")
+                        elif "right lower" in lat:
+                            para.text = para.text.replace("Right Lower Quadrant", "[X] Right Lower Quadrant")
+                        elif "left upper" in lat:
+                            para.text = para.text.replace("Left Upper Quadrant", "[X] Left Upper Quadrant")
+                        elif "right upper" in lat:
+                            para.text = para.text.replace("Right Upper Quadrant", "[X] Right Upper Quadrant")
+                    elif "Start Date:" in para.text:
+                        fill_underscores(para, inj2.get("start_date", ""))
+                    elif "Start Time:" in para.text:
+                        fill_underscores(para, inj2.get("start_time", ""))
+                    elif "Unblinded" in para.text:
+                        break  # End of Injection 2 section
+
         # === SECTION 16: Post-Dose Vitals (Table 1) ===
         if "vitals_post" in data:
             vitals = data["vitals_post"]
             if len(doc.tables) > 1:
                 table = doc.tables[1]
                 try:
-                    table.rows[0].cells[0].text += f" {vitals.get('weight', '')}"
-                    table.rows[1].cells[0].text += f" {vitals.get('bp', '')}"
-                    table.rows[2].cells[0].text += f" {vitals.get('hr', '')}"
-                    table.rows[3].cells[0].text += f" {vitals.get('temp', '')}"
-                    table.rows[4].cells[0].text += f" {vitals.get('rr', '')}"
+                    fill_table_cell(table.rows[0].cells[0], vitals.get('weight', ''))
+                    fill_table_cell(table.rows[1].cells[0], vitals.get('bp', ''))
+                    fill_table_cell(table.rows[2].cells[0], vitals.get('hr', ''))
+                    fill_table_cell(table.rows[3].cells[0], vitals.get('temp', ''))
+                    fill_table_cell(table.rows[4].cells[0], vitals.get('rr', ''))
                 except IndexError:
                     pass
 
@@ -218,6 +325,38 @@ class FormFiller:
                 if abn_count == 2:
                     mark_yes_no(para, False)
                     break
+
+        # === ECG Section (Fill numeric fields) ===
+        ecg = data.get("ecg", {})
+        for para in doc.paragraphs:
+            if "Heart rate (BPM):" in para.text:
+                fill_underscores(para, ecg.get("hr", ""))
+                break
+        
+        for para in doc.paragraphs:
+            if "PR (msec):" in para.text:
+                fill_underscores(para, ecg.get("pr", ""))
+                break
+        
+        for para in doc.paragraphs:
+            if "RR (msec):" in para.text:
+                fill_underscores(para, ecg.get("rr", ""))
+                break
+        
+        for para in doc.paragraphs:
+            if "QRS (msec):" in para.text:
+                fill_underscores(para, ecg.get("qrs", ""))
+                break
+        
+        for para in doc.paragraphs:
+            if "QT (msec):" in para.text:
+                fill_underscores(para, ecg.get("qt", ""))
+                break
+        
+        for para in doc.paragraphs:
+            if "Date performed:" in para.text:
+                fill_underscores(para, ecg.get("date", ""))
+                break
 
         # Save to buffer
         buffer = io.BytesIO()
