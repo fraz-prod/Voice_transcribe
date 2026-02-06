@@ -1,3 +1,14 @@
+# Python 3.13 Compatibility Shim for audioop
+try:
+    import audioop
+except ImportError:
+    try:
+        import audioop_lts as audioop
+        import sys
+        sys.modules['audioop'] = audioop
+    except ImportError:
+        pass
+
 import json
 from datetime import datetime
 
@@ -179,14 +190,51 @@ class RealAIService:
         self.client = OpenAI(api_key=api_key)
 
     def transcribe_audio(self, audio_file) -> str:
-        # Save buffer to temp file for Whisper (needs path or file-like with name)
-        # Streamlit file_uploader returns a BytesIO-like object. 
-        # OpenAI client handles it if it has a filename.
-        transcript = self.client.audio.transcriptions.create(
-            model="whisper-1", 
-            file=audio_file
+        # Use GPT-4o Audio for transcription to get better formatting (Speaker labels)
+        import base64
+        
+        # Read file bytes
+        # Streamlit uploaded_buffer needs to be read
+        if hasattr(audio_file, 'read'):
+            audio_file.seek(0)
+            file_bytes = audio_file.read()
+        else:
+            # Assume path
+            with open(audio_file, "rb") as f:
+                file_bytes = f.read()
+                
+        b64_audio = base64.b64encode(file_bytes).decode('utf-8')
+        
+        # Determine format
+        fmt = "wav"
+        if hasattr(audio_file, 'name') and audio_file.name.lower().endswith(".mp3"):
+            fmt = "mp3"
+        elif isinstance(audio_file, str) and audio_file.lower().endswith(".mp3"):
+            fmt = "mp3"
+
+        response = self.client.chat.completions.create(
+            model="gpt-4o-audio-preview",
+            modalities=["text"],
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are an expert medical transcriptionist. Transcribe the dialogue verbatim. Identify speakers as 'Nurse:' and 'Patient:'. details like ECG parameters, doses, and times must be transcribed accurately. Format clearly."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { 
+                            "type": "input_audio", 
+                            "input_audio": {
+                                "data": b64_audio,
+                                "format": fmt 
+                            }
+                        }
+                    ]
+                }
+            ]
         )
-        return transcript.text
+        return response.choices[0].message.content
 
     def extract_data(self, transcript: str) -> dict:
         prompt = """
@@ -227,7 +275,10 @@ class RealAIService:
         content = response.choices[0].message.content
         return json.loads(content)
 
-import vosk
+try:
+    import vosk
+except ImportError:
+    vosk = None
 import json
 import os
 import re
@@ -314,10 +365,68 @@ class LocalAIService:
             full_transcript = " ".join(all_transcripts)
             print(f"Transcription complete! Total length: {len(full_transcript)} characters")
             
-            return full_transcript
+            # Post-process: Add speaker labels and formatting
+            formatted_transcript = LocalAIService._format_transcript_with_speakers(full_transcript)
+            
+            return formatted_transcript
             
         except Exception as e:
             return f"Error transcribing with Vosk: {e}"
+
+    @staticmethod
+    def _format_transcript_with_speakers(raw_transcript: str) -> str:
+        """
+        Format raw continuous transcript into structured dialogue with speaker labels.
+        The audio contains spoken words "Nurse" and "Patient" which Vosk transcribes.
+        We detect these keywords and use them to split and format the conversation.
+        """
+        import re
+        
+        # The transcript contains "nurse" and "patient" as spoken words
+        # We'll use these as markers to split the dialogue
+        
+        # Replace common variations
+        text = raw_transcript
+        text = re.sub(r'\bnurse\s+', '\nNurse: ', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bpatient\s+', '\nPatient: ', text, flags=re.IGNORECASE)
+        
+        # Split into lines
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        
+        # Clean up lines - capitalize first letter after speaker label
+        formatted_lines = []
+        for line in lines:
+            if line.startswith('Nurse:') or line.startswith('Patient:'):
+                # Split on the colon
+                parts = line.split(':', 1)
+                if len(parts) == 2:
+                    speaker = parts[0]
+                    content = parts[1].strip()
+                    # Capitalize first letter
+                    if content:
+                        content = content[0].upper() + content[1:]
+                    formatted_lines.append(f"{speaker}: {content}")
+                else:
+                    formatted_lines.append(line)
+            else:
+                # Line doesn't start with speaker, might be continuation
+                # or the first line before any speaker was mentioned
+                if formatted_lines:
+                    # Append to previous line
+                    formatted_lines[-1] += ' ' + line
+                else:
+                    # First line, assume it's Nurse
+                    formatted_lines.append(f"Nurse: {line}")
+        
+        result = '\n'.join(formatted_lines)
+        
+        # If we didn't find any nurse/patient markers, return original with basic formatting
+        if 'Nurse:' not in result and 'Patient:' not in result:
+            print("Warning: No 'Nurse' or 'Patient' keywords found in transcription.")
+            print("The audio should contain spoken words 'Nurse' and 'Patient' as labels.")
+            return raw_transcript
+        
+        return result
 
     @staticmethod
     def extract_data(transcript: str, scenario="Eligible (Happy Path)") -> dict:
@@ -326,11 +435,57 @@ class LocalAIService:
             result = text
             import re
             
+            # Handle ordinals (including multi-word like "twenty sixth") - DO THIS FIRST
+            ordinals = {
+                'first': '1', 'second': '2', 'third': '3', 'fourth': '4', 'fifth': '5',
+                'sixth': '6', 'seventh': '7', 'eighth': '8', 'ninth': '9', 'tenth': '10',
+                'eleventh': '11', 'twelfth': '12', 'thirteenth': '13', 'fourteenth': '14',
+                'fifteenth': '15', 'sixteenth': '16', 'seventeenth': '17', 'eighteenth': '18',
+                'nineteenth': '19', 'twentieth': '20', 'twenty-first': '21', 'twenty-second': '22',
+                'twenty-third': '23', 'twenty-fourth': '24', 'twenty-fifth': '25',
+                'twenty-sixth': '26', 'twenty-seventh': '27', 'twenty-eighth': '28',
+                'twenty-ninth': '29', 'thirtieth': '30', 'thirty-first': '31'
+            }
+            for word, val in ordinals.items():
+                # Allow hyphen or space
+                pattern = r'\b' + word.replace('-', r'[-\s]+') + r'\b'
+                result = re.sub(pattern, val, result, flags=re.IGNORECASE)
+
+            # Fix common Vosk transcription errors for medical terminology
+            result = re.sub(r'\blater\s+reality\b', 'laterality', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bmilliliters?\b', 'ml', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bmilliliter\b', 'ml', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bkilograms?\b', 'kg', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bmilliseconds?\b', 'msec', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bday\s+performed\b', 'Date performed', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bday\s+collected\b', 'Date collected', result, flags=re.IGNORECASE)
+            
+            # Fix spacing issues (ec g -> ecg, b p m -> bpm, etc.)
+            result = re.sub(r'\b ec\s+g\b', 'ecg', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bb\s+p\s+m\b', 'bpm', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bp\s+r\b', 'pr', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bm\s+l\b', 'ml', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bq\s+t\b', 'qt', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bq\s+r\s+s\b', 'qrs', result, flags=re.IGNORECASE)
+            
+            # Handle special compound numbers from Vosk
+            # "one sixty" -> "160", "one eighty" -> "180"
+            result = re.sub(r'\bone\s+sixty\b', '160', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bone\s+seventy\b', '170', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bone\s+eighty\b', '180', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bone\s+ninety\b', '190', result, flags=re.IGNORECASE)
+            
+            # "eight thirty three" -> "833", "three eighty" -> "380"
+            result = re.sub(r'\beight\s+thirty\s+three\b', '833', result, flags=re.IGNORECASE)
+            result = re.sub(r'\beight\s+thirty\b', '830', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bthree\s+eighty\b', '380', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bthree\s+hundred\b', '300', result, flags=re.IGNORECASE)
+            
             # Handle special patterns like "one eighteen" -> "118", "one twenty" -> "120"
-            result = re.sub(r'\bone eighteen\b', '118', result, flags=re.IGNORECASE)
-            result = re.sub(r'\bone twenty\b', '120', result, flags=re.IGNORECASE)
-            result = re.sub(r'\bone hundred\b', '100', result, flags=re.IGNORECASE)
-            result = re.sub(r'\btwo hundred\b', '200', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bone\s+eighteen\b', '118', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bone\s+twenty\b', '120', result, flags=re.IGNORECASE)
+            result = re.sub(r'\bone\s+hundred\b', '100', result, flags=re.IGNORECASE)
+            result = re.sub(r'\btwo\s+hundred\b', '200', result, flags=re.IGNORECASE)
             
             # Handle "thirty six point eight" -> "36 point 8" -> "36.8"
             # First handle tens + unit for the integer part
@@ -340,7 +495,7 @@ class LocalAIService:
                 for unit_word, unit_val in [('one', '1'), ('two', '2'), ('three', '3'), 
                                               ('four', '4'), ('five', '5'), ('six', '6'),
                                               ('seven', '7'), ('eight', '8'), ('nine', '9')]:
-                    pattern = tens_word + r'\s*' + unit_word
+                    pattern = tens_word + r'\s+' + unit_word
                     replacement = tens_val + unit_val
                     result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
             
@@ -363,12 +518,27 @@ class LocalAIService:
             # Handle "X point Y" for decimals
             result = re.sub(r'(\d+)\s+point\s+(\d+)', r'\1.\2', result)
             
+            # Handle years: "twenty twenty six" -> "2026", "20 26" -> "2026"
+            result = re.sub(r'\b(19|20)\s+(\d{2})\b', r'\1\2', result)
+            
             return result
-        
+
         # Normalize transcript
         transcript_clean = transcript.replace("subject to", "subject id").replace("slash", "/")
         transcript_clean = word_to_num(transcript_clean)
         
+        # Helper to extract time
+        def extract_time(pattern, text):
+            # Flexible time pattern: "9:25" or "9 25" or "10 o 5"
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                h = match.group(1)
+                m = match.group(2)
+                if len(h) == 1: h = "0" + h
+                if len(m) == 1: m = "0" + m
+                return f"{h}:{m}"
+            return None
+
         data = MockAIService.SCENARIOS["Eligible (Happy Path)"]["data"].copy()
         
         # Reset specific fields
@@ -428,7 +598,13 @@ class LocalAIService:
         if "Takhzyro" in meds:
              data["last_dose"]["medication"] = "Takhzyro"
 
-        # Vitals extraction with flexible patterns for Vosk output
+        # Vitals Extraction (Looking for digits)
+        
+        # Time Collected (Pre-dose)
+        # Look for "Time collected" before vitals or related context
+        time_pre = extract_time(r'(?:Physical examination pre dose|Visual).*?Time collected\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
+        if time_pre:
+            data["vitals_pre"]["time_collected"] = time_pre
         
         # Weight: "78 kg" or "78 kilograms" or just "78" after weight context
         w_match = re.search(r'(weight|weigh)\s*(\d{2,3})\s*(kg|kilo|kilogram)?', transcript_clean, re.IGNORECASE)
@@ -510,23 +686,28 @@ class LocalAIService:
             data["ecg"]["result"] = "Normal"
         
         # ECG Date
-        ecg_date = re.search(r'ECG.*?Date performed\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        ecg_date = re.search(r'ECG.*?(?:Date|Day) performed\s*(.*?)\s+(?:Time|Tom)', transcript_clean, re.IGNORECASE | re.DOTALL)
         if ecg_date:
-            data["ecg"]["date"] = ecg_date.group(1)
+            data["ecg"]["date"] = ecg_date.group(1).strip()
 
         # === Labs Extraction ===
         data["labs"] = {"collected": True}
-        labs_date = re.search(r'Lab.*?Date collected\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        labs_date = re.search(r'Lab.*?(Date|Day) collected\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
         if labs_date:
-            data["labs"]["date"] = labs_date.group(1)
+            data["labs"]["date"] = labs_date.group(2)
         
-        labs_time = re.search(r'Lab.*?Time collected\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        labs_time = extract_time(r'Lab.*?Time collected\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
         if labs_time:
-            data["labs"]["time"] = labs_time.group(1)
+            data["labs"]["time"] = labs_time
         
-        urine_time = re.search(r'Urine collection time\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE)
+        urine_time = extract_time(r'Urine collection time\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
         if urine_time:
-            data["labs"]["urine_time"] = urine_time.group(1)
+            data["labs"]["urine_time"] = urine_time
+
+        # === Notes Extraction ===
+        notes_match = re.search(r'Notes[:\s]+(.*?)(Nurse|$)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        if notes_match:
+            data["notes"] = notes_match.group(1).strip()
 
         # === Pregnancy Test Extraction ===
         data["pregnancy"] = {}
@@ -542,39 +723,41 @@ class LocalAIService:
         if preg_date:
             data["pregnancy"]["date"] = preg_date.group(1)
         
-        preg_time = re.search(r'Collection time\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE)
+        preg_time = extract_time(r'Collection time\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
         if preg_time:
-            data["pregnancy"]["time"] = preg_time.group(1)
+            data["pregnancy"]["time"] = preg_time
 
         # === Injection 1 Extraction ===
-        inj1_match = re.search(r'Injection 1.*?Dose administered\s*(\d+\s*mL).*?Anatomical location\s*(\w+).*?Laterality\s*([\w\s]+?)\.?\s*(Route|Start)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        # More flexible pattern: "anatomic" or "anatomical", flexible spacing
+        inj1_match = re.search(r'Injection\s*1.*?dose administered\s*(\d+)\s*ml.*?anatom\w+\s+location\s+(\w+).*?laterality\s+([\w\s]+?)\s+(route|start)', transcript_clean, re.IGNORECASE | re.DOTALL)
         if inj1_match:
             data["injection"] = {
-                "dose": inj1_match.group(1),
+                "dose": inj1_match.group(1) + " mL",
                 "site": inj1_match.group(2),
                 "laterality": inj1_match.group(3).strip()
             }
         
-        inj1_time = re.search(r'Injection 1.*?Start time\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE | re.DOTALL)
-        if inj1_time and "injection" in data:
-            data["injection"]["start_time"] = inj1_time.group(1)
+        inj1_time_str = extract_time(r'Injection\s*1.*?Start time\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
+        if inj1_time_str and "injection" in data:
+            data["injection"]["start_time"] = inj1_time_str
         
-        inj1_date = re.search(r'Injection 1.*?Start date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        inj1_date = re.search(r'Injection\s*1.*?Start date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
         if inj1_date and "injection" in data:
             data["injection"]["start_date"] = inj1_date.group(1)
 
         # === Injection 2 Extraction ===
-        inj2_match = re.search(r'Injection 2.*?Dose administered\s*(\d+\s*mL).*?Anatomical location\s*(\w+).*?Laterality\s*([\w\s]+?)\.?\s*(Route|Start)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        # More flexible pattern: "anatomic" or "anatomical", flexible spacing
+        inj2_match = re.search(r'Injection\s*2.*?dose administered\s*(\d+)\s*ml.*?anatom\w+\s+location\s+(\w+).*?laterality\s+([\w\s]+?)\s+(route|start)', transcript_clean, re.IGNORECASE | re.DOTALL)
         if inj2_match:
             data["injection_2"] = {
-                "dose": inj2_match.group(1),
+                "dose": inj2_match.group(1) + " mL",
                 "site": inj2_match.group(2),
                 "laterality": inj2_match.group(3).strip()
             }
         
-        inj2_time = re.search(r'Injection 2.*?Start time\s*(\d{1,2}:\d{2})', transcript_clean, re.IGNORECASE | re.DOTALL)
-        if inj2_time and "injection_2" in data:
-            data["injection_2"]["start_time"] = inj2_time.group(1)
+        inj2_time_str = extract_time(r'Injection\s*2.*?Start time\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
+        if inj2_time_str and "injection_2" in data:
+            data["injection_2"]["start_time"] = inj2_time_str
         
         inj2_date = re.search(r'Injection 2.*?Start date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
         if inj2_date and "injection_2" in data:

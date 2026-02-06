@@ -131,6 +131,21 @@ class FormFiller:
         # === SECTION 10: Pre-Dose Vitals (Table 0) ===
         if "vitals_pre" in data:
             vitals = data["vitals_pre"]
+            
+            # Try to find "Time collected" specifically for Pre-dose (before Labs)
+            # Use a flag to ensure we only fill the first one we find in this context
+            found_predose = False
+            for para in doc.paragraphs:
+                if "Physical Exam completed?" in para.text:
+                    found_predose = True
+                
+                if found_predose and "Time collected" in para.text:
+                    fill_underscores(para, vitals.get("time_collected", ""))
+                    break
+                
+                if "Laboratory" in para.text: # Safety stop
+                    break
+
             if len(doc.tables) > 0:
                 table = doc.tables[0]
                 try:
@@ -147,8 +162,21 @@ class FormFiller:
             if "Was the 12-lead ECG performed?" in para.text:
                 mark_yes_no(para, True)
                 break
-
+        
+        # Check for ECG Date specifically in ECG section
         ecg = data.get("ecg", {})
+        found_ecg = False
+        for para in doc.paragraphs:
+            if "Was the 12-lead ECG performed?" in para.text:
+                found_ecg = True
+            
+            if found_ecg:
+                if "Date performed:" in para.text or "Day performed:" in para.text:
+                    fill_underscores(para, ecg.get("date", ""))
+                    break
+                if "Laboratory" in para.text: 
+                     break
+
         for para in doc.paragraphs:
             if "Results:" in para.text and "Normal" in para.text:
                 result = ecg.get("result", "Normal")
@@ -157,28 +185,22 @@ class FormFiller:
                 break
 
         # === SECTION 12: Labs ===
-        for para in doc.paragraphs:
-            if "Were all required labs collected?" in para.text:
-                labs = data.get("labs", {})
-                mark_yes_no(para, labs.get("collected", True))
-                break
-
-        # Fill Labs Date/Time
         labs = data.get("labs", {})
+        found_labs = False
         for para in doc.paragraphs:
-            if "Date collected?" in para.text:
-                fill_underscores(para, labs.get("date", ""))
-                break
-        
-        for para in doc.paragraphs:
-            if "Time collected?" in para.text:
-                fill_underscores(para, labs.get("time", ""))
-                break
-        
-        for para in doc.paragraphs:
-            if "Urine collection time:" in para.text:
-                fill_underscores(para, labs.get("urine_time", ""))
-                break
+            if "Laboratory assessments" in para.text or "Were all required labs collected?" in para.text:
+                found_labs = True
+                if "Were all required labs collected?" in para.text:
+                     mark_yes_no(para, labs.get("collected", True))
+            
+            if found_labs:
+                if "Date collected?" in para.text:
+                    fill_underscores(para, labs.get("date", ""))
+                elif "Time collected?" in para.text:
+                    fill_underscores(para, labs.get("time", ""))
+                elif "Urine collection time:" in para.text:
+                    fill_underscores(para, labs.get("urine_time", ""))
+                    break # Assuming this is the last field in Labs section we care about specific dates/times for
 
         for para in doc.paragraphs:
             if "Was Pharmacogenetics (DNA paxgene) sample collected?" in para.text:
@@ -357,6 +379,20 @@ class FormFiller:
             if "Date performed:" in para.text:
                 fill_underscores(para, ecg.get("date", ""))
                 break
+
+        # === Notes Section ===
+        if "notes" in data:
+            for para in doc.paragraphs:
+                if "Notes:" in para.text:
+                   # Use fill_underscores logic or just append if no underscores
+                   # Assuming the notes are meant to follow "Notes:"
+                   # Check if already filled or if it's a header
+                   if len(para.text.strip()) < 10: # Just "Notes:" or similar
+                       para.text = para.text + " " + data["notes"]
+                   else:
+                       # Might already have content, but let's try to append
+                       para.text = para.text + " " + data["notes"]
+                   break
 
         # Save to buffer
         buffer = io.BytesIO()
