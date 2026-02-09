@@ -31,12 +31,12 @@ def check_access():
         print("- Zero budget / Billing issues")
         return
 
-    # 3. Check for whisper-1 specifically
-    print("\n[2/3] Checking for 'whisper-1' model based on list...")
-    if "whisper-1" in model_ids:
-        print("✅ 'whisper-1' found in your available models.")
+    # 3. Check for gpt-4o-transcribe specifically
+    print("\n[2/3] Checking for 'gpt-4o-transcribe' model based on list...")
+    if "gpt-4o-transcribe" in model_ids:
+        print("✅ 'gpt-4o-transcribe' found in your available models.")
     else:
-        print("❌ 'whisper-1' NOT found in your available models.")
+        print("❌ 'gpt-4o-transcribe' NOT found in your available models.")
         print("Available models start with:", model_ids[:5])
         print("\nCommon reasons:")
         print("- Your Project configuration specifically excludes this model.")

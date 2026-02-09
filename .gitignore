@@ -215,5 +215,8 @@ __pycache__/
 *.docx
 *.pdf
 *.txt
+!sample.txt
+!live.txt
 !requirements.txt
+model/
 

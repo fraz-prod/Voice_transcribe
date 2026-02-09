@@ -381,18 +381,79 @@ class FormFiller:
                 break
 
         # === Notes Section ===
-        if "notes" in data:
+        if "notes" in data and data["notes"]:
+            # Fill ALL Notes sections (there may be multiple)
             for para in doc.paragraphs:
                 if "Notes:" in para.text:
-                   # Use fill_underscores logic or just append if no underscores
-                   # Assuming the notes are meant to follow "Notes:"
-                   # Check if already filled or if it's a header
-                   if len(para.text.strip()) < 10: # Just "Notes:" or similar
-                       para.text = para.text + " " + data["notes"]
-                   else:
-                       # Might already have content, but let's try to append
-                       para.text = para.text + " " + data["notes"]
-                   break
+                    # Use fill_underscores to replace the underscore pattern
+                    fill_underscores(para, data["notes"])
+
+        # === NEW: Overflow Information Section ===
+        if "overflow_information" in data and data["overflow_information"]:
+            overflow = data["overflow_information"]
+            
+            # Add section header
+            doc.add_paragraph()
+            header = doc.add_paragraph("Additional Medical Information (Beyond Protocol Fields)")
+            header.runs[0].bold = True
+            
+            # Patient Concerns
+            if overflow.get("patient_concerns"):
+                p = doc.add_paragraph("Patient Concerns:")
+                p.runs[0].bold = True
+                for concern in overflow["patient_concerns"]:
+                    doc.add_paragraph(f"  • {concern}")
+            
+            # Medication Questions
+            if overflow.get("medication_questions"):
+                p = doc.add_paragraph("Medication Questions:")
+                p.runs[0].bold = True
+                for question in overflow["medication_questions"]:
+                    doc.add_paragraph(f"  • {question}")
+            
+            # Unreported Symptoms
+            if overflow.get("unreported_symptoms"):
+                p = doc.add_paragraph("Unreported Symptoms (mentioned but not as AE):")
+                p.runs[0].bold = True
+                for symptom in overflow["unreported_symptoms"]:
+                    doc.add_paragraph(f"  • {symptom}")
+            
+            # Safety Observations
+            if overflow.get("safety_observations"):
+                p = doc.add_paragraph("Safety Observations:")
+                p.runs[0].bold = True
+                for obs in overflow["safety_observations"]:
+                    doc.add_paragraph(f"  • {obs}")
+            
+            # Other Clinical Notes
+            if overflow.get("other_clinical_notes"):
+                p = doc.add_paragraph("Other Clinical Notes:")
+                p.runs[0].bold = True
+                for note in overflow["other_clinical_notes"]:
+                    doc.add_paragraph(f"  • {note}")
+        
+        # === NEW: Validation Information ===
+        if "validation" in data:
+            val = data["validation"]
+            doc.add_paragraph()
+            val_header = doc.add_paragraph("Data Validation Summary")
+            val_header.runs[0].bold = True
+            
+            completeness = val.get("completeness_score", "N/A")
+            protocol_ok = "Yes" if val.get("protocol_compliance", False) else "No"
+            overflow_detected = "Yes" if val.get("overflow_detected", False) else "No"
+            requires_review = "Yes" if val.get("requires_review", False) else "No"
+            
+            doc.add_paragraph(f"Completeness Score: {completeness}%")
+            doc.add_paragraph(f"Protocol Compliance: {protocol_ok}")
+            doc.add_paragraph(f"Overflow Information Detected: {overflow_detected}")
+            doc.add_paragraph(f"Requires Human Review: {requires_review}")
+            
+            if val.get("flags"):
+                p = doc.add_paragraph("Flags/Warnings:")
+                p.runs[0].bold = True
+                for flag in val["flags"]:
+                    doc.add_paragraph(f"  • {flag}")
 
         # Save to buffer
         buffer = io.BytesIO()

@@ -2,27 +2,76 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from logic import WashoutCalculator, RuleEngine
-from ai_services import MockAIService, RealAIService, LocalAIService
+from ai_services import MockAIService, RealAIService, LocalAIService, LocalWhisperService, GeminiAIService
 from form_filler import FormFiller
 import os
+
+# --- HOTFIX: Add FFmpeg to PATH programmatically ---
+# We found it in Downloads, so we add it here to ensure pydub/whisper can find it.
+ffmpeg_path = r"c:\Users\RagaAI_User\Downloads\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin"
+if os.path.exists(ffmpeg_path):
+    os.environ["PATH"] += os.pathsep + ffmpeg_path
+# ---------------------------------------------------
+
+@st.cache_resource
+def get_faster_whisper_model():
+    from faster_whisper import WhisperModel
+    import torch
+    
+    model_size = "medium"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    compute_type = "float16" if device == "cuda" else "int8"
+    
+    print(f"Initializing Faster-Whisper model ({model_size}) on {device}...")
+    return WhisperModel(model_size, device=device, compute_type=compute_type)
 
 st.set_page_config(layout="wide", page_title="Eligibility Screening Assistant")
 
 st.title("Voice-Enabled Eligibility Screening Assistant")
 
+# Pre-initialize Whisper model at startup
+@st.cache_data
+def check_model_initialized():
+    return True
+
+if check_model_initialized():
+    # This will trigger model loading when the mode is selected
+    pass
+
 # Sidebar for controls
 st.sidebar.header("Controls")
-mode = st.sidebar.selectbox("Mode", ["Mock Mode", "Local Mode (No LLM)", "Live Mode (Requires API Key)"])
+mode = st.sidebar.selectbox("Mode", ["Mock Mode", "Local Mode (No LLM)", "Local Whisper Mode (No API Key)", "Gemini Mode (Gemini API)", "Live Mode (Requires API Key)"])
+
+# Pre-load Whisper model if in Whisper mode
+if mode == "Local Whisper Mode (No API Key)":
+    with st.sidebar:
+        with st.spinner("🔄 Initializing Whisper model..."):
+            whisper_model = get_faster_whisper_model()
+        st.success("✅ Whisper model ready!")
+else:
+    whisper_model = None
 
 mock_scenario = "Eligible (Happy Path)"
 if mode == "Mock Mode":
     mock_scenario = st.sidebar.selectbox("Test Scenario", list(MockAIService.SCENARIOS.keys()))
 
 api_key = None
+gemini_api_key = None
+
 if mode == "Live Mode (Requires API Key)":
     api_key = st.sidebar.text_input("OpenAI API Key", type="password")
     if not api_key:
         st.warning("Please enter your API Key to use Live Mode.")
+
+if mode == "Gemini Mode (Gemini API)":
+    # Try to load from .env first
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    default_key = os.getenv("GEMINI_API_KEY", "")
+    gemini_api_key = st.sidebar.text_input("Gemini API Key", value=default_key, type="password")
+    if not gemini_api_key:
+        st.warning("Please enter your Gemini API Key to use Gemini Mode.")
 
 col1, col2 = st.columns(2)
 
@@ -30,9 +79,17 @@ with col1:
     st.header("1. Call Recording/Transcription")
     uploaded_file = st.file_uploader("Upload Audio or Text Transcript", type=["wav", "mp3", "txt"])
     
-    if st.button("Start Processing") or uploaded_file:
+    # Use button to trigger processing, not automatic on file upload
+    process_button = st.button("Start Processing")
+    
+    # Only process if button is clicked AND file is uploaded
+    if process_button and uploaded_file:
         if mode == "Live Mode (Requires API Key)" and not api_key:
             st.error("API Key missing.")
+            st.stop()
+        
+        if mode == "Gemini Mode (Gemini API)" and not gemini_api_key:
+            st.error("Gemini API Key missing.")
             st.stop()
             
         with st.spinner("Processing..."):
@@ -54,6 +111,67 @@ with col1:
                     transcript = LocalAIService.transcribe_audio(uploaded_file)
                 
                 extracted_data = LocalAIService.extract_data(transcript)
+
+            
+            elif mode == "Local Whisper Mode (No API Key)":
+                 # Local Whisper execution
+                if uploaded_file.name.endswith(".txt"):
+                    transcript = uploaded_file.read().decode("utf-8")
+                else:
+                    # Audio Input - Use LocalWhisperService with Pre-loaded Model
+                    try:
+                        # Use the pre-loaded model from sidebar
+                        transcript_placeholder = st.empty()
+                        transcript_placeholder.info("🎙️ Transcribing audio... This will show live updates.")
+                        
+                        transcript = LocalWhisperService.transcribe_audio(
+                            uploaded_file, 
+                            model=whisper_model,
+                            streaming_callback=lambda text: transcript_placeholder.text_area(
+                                "Live Transcript (Streaming)", text, height=300, key=f"stream_{len(text)}"
+                            )
+                        )
+                        transcript_placeholder.empty()  # Clear the placeholder
+                    except Exception as e:
+                         st.error(f"Error transcribing: {e}")
+                         st.stop()
+                
+                extracted_data = LocalWhisperService.extract_data(transcript)
+            
+            elif mode == "Gemini Mode (Gemini API)":
+                # Gemini Mode execution
+                if not gemini_api_key:
+                    st.error("Gemini API Key missing.")
+                    st.stop()
+                
+                try:
+                    service = GeminiAIService(gemini_api_key)
+                    
+                    if uploaded_file.name.endswith(".txt"):
+                        # Direct Text Input
+                        transcript = uploaded_file.read().decode("utf-8")
+                    else:
+                        # For audio, use Local Whisper for transcription
+                        # Initialize Whisper model if needed
+                        if whisper_model is None:
+                            with st.spinner("🔄 Loading Whisper model for transcription..."):
+                                whisper_model = get_faster_whisper_model()
+                        
+                        with st.spinner("🎙️ Transcribing audio..."):
+                            transcript = LocalWhisperService.transcribe_audio(uploaded_file, model=whisper_model)
+                    
+                    # Use Gemini for extraction
+                    with st.spinner("🤖 Extracting data with Gemini AI..."):
+                        extracted_data = service.extract_data(transcript)
+                except ImportError as e:
+                    st.error("❌ google-generativeai not installed. Please run: pip install google-generativeai")
+                    st.stop()
+                except Exception as e:
+                    st.error(f"Error calling Gemini API: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+                    st.stop()
+
             else:
                 try:
                     service = RealAIService(api_key)
@@ -69,12 +187,12 @@ with col1:
                 except Exception as e:
                     error_str = str(e)
                     if "403" in error_str and "model_not_found" in error_str:
-                        st.error(f"🚨 Access Denied to 'whisper-1' model. Details: {e}")
+                        st.error(f"🚨 Access Denied to 'gpt-4o-transcribe' (or configured model). Details: {e}")
                         st.warning("""
                         **Solution:**
                         1. Go to your OpenAI Dashboard > Settings > Projects.
                         2. Select your Project.
-                        3. Go to **Models** and ensure `whisper-1` is enabled/allowed.
+                        3. Go to **Models** and ensure `gpt-4o-transcribe` is enabled/allowed.
                         4. Or use a different API Key (e.g. from a 'Default' project).
                         """)
                     else:
@@ -109,25 +227,60 @@ with col2:
         st.table(df_results)
         
         st.subheader("Washout Calculator")
-        if data.get("last_dose"):
-            ld = data["last_dose"]
+        
+        # Check for last_dose data and medications
+        last_dose = data.get("last_dose")
+        medications = data.get("medications", [])
+        
+        if last_dose and last_dose.get("medication") and last_dose.get("date"):
+            ld = last_dose
             try:
-                date_obj = datetime.strptime(ld["date"], "%Y-%m-%d")
+                # Parse date - handle multiple formats
+                date_str = ld["date"]
+                try:
+                    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    # Try other formats
+                    try:
+                        date_obj = datetime.strptime(date_str, "%d %B %Y")
+                    except ValueError:
+                        date_obj = datetime.strptime(date_str, "%B %d, %Y")
+                
                 washout_info = WashoutCalculator.calculate_end_date(ld["medication"], date_obj)
                 
-                st.info(f"Medication: {washout_info['medication']}")
-                st.info(f"Washout Period: {washout_info['washout_days']} days")
-                st.success(f"Earliest Run-In Date: {washout_info['end_date'].strftime('%Y-%m-%d')}")
+                st.info(f"💊 Medication: {washout_info['medication']}")
+                st.info(f"⏱️ Washout Period: {washout_info['washout_days']} days")
+                st.success(f"📅 Earliest Run-In Date: {washout_info['end_date'].strftime('%Y-%m-%d')}")
             except Exception as e:
                 st.error(f"Error calculating washout: {e}")
+        elif medications:
+            # If we have medications but no last_dose, show a message
+            st.warning(f"⚠️ Medications found: {', '.join(medications)}")
+            st.info("Please ensure the transcript includes the last dose date for washout calculation.")
+        else:
+            st.info("ℹ️ No medication or last dose information found in transcript.")
 
         st.divider()
         st.header("3. Source Document Generation")
         
-        template_path = "[Internal] of Astria STAR 0215-301 Day 1.docx"
-        if os.path.exists(template_path):
+        # File Uploaders for Protocol and Template
+        st.subheader("Configuration")
+        uploaded_protocol = st.file_uploader("Upload Protocol (PDF)", type=["pdf"])
+        uploaded_template = st.file_uploader("Upload Form Template (DOCX)", type=["docx"])
+
+        # Default template path
+        default_template_path = "[Internal] of Astria STAR 0215-301 Day 1.docx"
+        
+        # Determine strict template to use
+        template_to_use = None
+        if uploaded_template:
+            template_to_use = uploaded_template
+        elif os.path.exists(default_template_path):
+            template_to_use = default_template_path
+        
+        if template_to_use:
              if st.button("Auto-Fill Day 1 Visit Form"):
-                filler = FormFiller(template_path)
+                filler = FormFiller(template_to_use)
                 filled_doc = filler.fill_form(data, is_eligible=overall_eligible)
                 
                 st.download_button(
@@ -138,4 +291,4 @@ with col2:
                 )
                 st.success("Form generated! Click above to download.")
         else:
-            st.warning(f"Template file not found: {template_path}")
+             st.warning(f"Template file not found: {default_template_path}. Please upload a template.")

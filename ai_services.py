@@ -9,8 +9,10 @@ except ImportError:
     except ImportError:
         pass
 
+
 import json
 from datetime import datetime
+from gemini_prompt_template import ENHANCED_PROMPT_TEMPLATE
 
 class MockAIService:
     SCENARIOS = {
@@ -213,7 +215,7 @@ class RealAIService:
             fmt = "mp3"
 
         response = self.client.chat.completions.create(
-            model="gpt-4o-audio-preview",
+            model="gpt-4o-transcribe",
             modalities=["text"],
             messages=[
                 {
@@ -549,18 +551,12 @@ class LocalAIService:
         
         # === Extraction Logic ===
         
-        # Visit Date: "Date 26 January 2026" or "26/01/2026" etc.
-        # Simple extraction for "YYYY-MM-DD" conversion might be complex without a lib, 
-        # so let's capture the string first. The form filler might handle string dates if format matches.
-        # User sample: "26 January 26" -> This could mean 2026.
-        # Let's try to find a date pattern.
-        date_match = re.search(r'(Date|today\'s date)\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE)
+        # === Extraction Logic ===
+        
+        # Visit Date: Supports "26 January 2026" or "January 26, 2026"
+        date_match = re.search(r'(Date|today\'s date)\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4}|[A-Za-z]+\s+\d{1,2},?\s*\d{4})', transcript_clean, re.IGNORECASE)
         if date_match:
-             # Basic parsing: "26 January 2026"
-             raw_date = date_match.group(2)
-             # Basic normalization attempt could go here, but passing raw string might be safer for now
-             # if the form filler just puts it in.
-             data["visit_date"] = raw_date
+             data["visit_date"] = date_match.group(2)
 
         # Subject ID: "Subject ID 0215 dash 301" or "0215-301"
         sid_match = re.search(r'Subject ID\s*([\w\d\-\s]+?)(,|\.|Date)', transcript_clean, re.IGNORECASE)
@@ -571,7 +567,6 @@ class LocalAIService:
         # Initials: "Initials A.K." or "initials JK"
         init_match = re.search(r'Initials\s*([A-Za-z\.]+)', transcript_clean, re.IGNORECASE)
         if init_match:
-             # We assume there isn't a field in the mock data for initials, but good to extract if needed.
              pass
 
         # Age
@@ -597,37 +592,78 @@ class LocalAIService:
             
         if "Takhzyro" in meds:
              data["last_dose"]["medication"] = "Takhzyro"
+        elif "Orladeyo" in meds:
+             data["last_dose"]["medication"] = "Orladeyo"
+             
+        # Extract last dose date in various formats
+        if data["last_dose"].get("medication"):
+            date_patterns = [
+                r'last dose\s+(?:was\s+)?([A-Za-z]+\s+\d{1,2},?\s*\d{4})',  # "last dose January 15, 2025"
+                r'last dose\s+(?:was\s+)?(\d{1,2}\s+[A-Za-z]+\s+\d{4})',  # "last dose 15 January 2025"
+                r'last dose\s+(?:was\s+)?(\d{4}-\d{2}-\d{2})',  # "last dose 2025-01-15"
+                r'(?:took|received|given)\s+(?:Takhzyro|Orladeyo|medication)\s+(?:on\s+)?([A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?,?\s*\d{4})',  # "took Takhzyro on January 15th, 2025"
+                r'(?:took|received|given)\s+(?:Takhzyro|Orladeyo|medication)\s+(?:on\s+)?(\d{1,2}\s+[A-Za-z]+\s+\d{4})',  # "took Takhzyro on 15 January 2025"
+                r'(?:took|received|given)\s+(?:Takhzyro|Orladeyo|medication)\s+(?:on\s+)?(\d{4}-\d{2}-\d{2})',  # "took Takhzyro on 2025-01-15"
+            ]
+            
+            for pattern in date_patterns:
+                date_match = re.search(pattern, transcript_clean, re.IGNORECASE)
+                if date_match:
+                    # Clean up the date string (remove ordinals like 'st', 'nd', 'rd', 'th')
+                    date_str = date_match.group(1).strip()
+                    date_str = re.sub(r'(\d+)(?:st|nd|rd|th)', r'\1', date_str)
+                    data["last_dose"]["date"] = date_str
+                    break
+        elif "Orladeyo" in meds:
+             data["last_dose"]["medication"] = "Orladeyo"
+             
+        # Extract last dose date in various formats
+        if data["last_dose"].get("medication"):
+            date_patterns = [
+                r'last dose\s+(?:was\s+)?([A-Za-z]+\s+\d{1,2},?\s*\d{4})',  # "last dose January 15, 2025"
+                r'last dose\s+(?:was\s+)?(\d{1,2}\s+[A-Za-z]+\s+\d{4})',  # "last dose 15 January 2025"
+                r'last dose\s+(?:was\s+)?(\d{4}-\d{2}-\d{2})',  # "last dose 2025-01-15"
+                r'(?:took|received|given)\s+(?:Takhzyro|Orladeyo|medication)\s+(?:on\s+)?([A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?,?\s*\d{4})',  # "took Takhzyro on January 15th, 2025"
+                r'(?:took|received|given)\s+(?:Takhzyro|Orladeyo|medication)\s+(?:on\s+)?(\d{1,2}\s+[A-Za-z]+\s+\d{4})',  # "took Takhzyro on 15 January 2025"
+                r'(?:took|received|given)\s+(?:Takhzyro|Orladeyo|medication)\s+(?:on\s+)?(\d{4}-\d{2}-\d{2})',  # "took Takhzyro on 2025-01-15"
+            ]
+            
+            for pattern in date_patterns:
+                date_match = re.search(pattern, transcript_clean, re.IGNORECASE)
+                if date_match:
+                    # Clean up the date string (remove ordinals like 'st', 'nd', 'rd', 'th')
+                    date_str = date_match.group(1).strip()
+                    date_str = re.sub(r'(\d+)(?:st|nd|rd|th)', r'\1', date_str)
+                    data["last_dose"]["date"] = date_str
+                    break
 
         # Vitals Extraction (Looking for digits)
         
         # Time Collected (Pre-dose)
-        # Look for "Time collected" before vitals or related context
-        time_pre = extract_time(r'(?:Physical examination pre dose|Visual).*?Time collected\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
+        time_pre = extract_time(r'(?:Physical examination pre dose|Visual).*?Time collected\s*(\d{1,2})[\s:o\.]+(\d{1,2})', transcript_clean)
         if time_pre:
             data["vitals_pre"]["time_collected"] = time_pre
         
-        # Weight: "78 kg" or "78 kilograms" or just "78" after weight context
+        # Weight
         w_match = re.search(r'(weight|weigh)\s*(\d{2,3})\s*(kg|kilo|kilogram)?', transcript_clean, re.IGNORECASE)
         if w_match:
             data["vitals_pre"]["weight"] = str(w_match.group(2))
 
-        # BP: "118/76" or "118 over 76" (now converted) or "118.76"
-        # Also handle "push you" which Vosk might interpret as "pressure"
+        # BP
         bp_match = re.search(r'(blood pressure|pressure|push)\s*(\d{2,3})[/\.](\d{2,3})', transcript_clean, re.IGNORECASE)
         if bp_match:
             data["vitals_pre"]["bp"] = f"{bp_match.group(2)}/{bp_match.group(3)}"
         
-        # HR: "72 bpm" or "heart rate 72" or "bpl" (Vosk misheard bpm)
+        # HR
         hr_match = re.search(r'(heart rate|rate)\s*(\d{2,3})\s*(bpm|bpl|be p m)?', transcript_clean, re.IGNORECASE)
         if not hr_match:
-            # Try standalone "XX bpm" pattern
             hr_match = re.search(r'(\d{2,3})\s*(bpm|bpl|be p m)', transcript_clean, re.IGNORECASE)
             if hr_match:
                 data["vitals_pre"]["hr"] = str(hr_match.group(1))
         else:
             data["vitals_pre"]["hr"] = str(hr_match.group(2))
 
-        # Temp: "36.8" or "six point eight" (converted) or "36 point 8"
+        # Temp
         t_match = re.search(r'(temperature|temp)\s*(\d{2})[.\s]*(\d{1,2})?', transcript_clean, re.IGNORECASE)
         if t_match:
             temp_val = t_match.group(2)
@@ -635,7 +671,7 @@ class LocalAIService:
                 temp_val += "." + t_match.group(3)
             data["vitals_pre"]["temp"] = temp_val
 
-        # RR: "16 breaths" or "respiratory rate 16"
+        # RR
         rr_match = re.search(r'(respiratory rate|respiratory|breaths)\s*(\d{2})', transcript_clean, re.IGNORECASE)
         if not rr_match:
             rr_match = re.search(r'(\d{2})\s*breaths', transcript_clean, re.IGNORECASE)
@@ -644,8 +680,7 @@ class LocalAIService:
         else:
             data["vitals_pre"]["rr"] = str(rr_match.group(2))
         
-        # === Post-Dose Vitals (look for "post" context) ===
-        # Find vitals after "post-dose" or "1 hour post"
+        # === Post-Dose Vitals ===
         post_section = re.search(r'(post.?dose|1 hour post)(.*?)($|Notes:|Participant)', transcript_clean, re.IGNORECASE | re.DOTALL)
         if post_section:
             post_text = post_section.group(2)
@@ -673,34 +708,46 @@ class LocalAIService:
 
         # === ECG Extraction ===
         data["ecg"] = {}
-        ecg_match = re.search(r'ECG.*?Heart rate\s*(\d{2,3})\s*BPM.*?PR\s*(\d{2,3})\s*msec.*?RR\s*(\d{2,4})\s*msec.*?QRS\s*(\d{2,3})\s*msec.*?QT\s*(\d{2,3})\s*msec', transcript_clean, re.IGNORECASE | re.DOTALL)
-        if ecg_match:
-            data["ecg"]["hr"] = ecg_match.group(1)
-            data["ecg"]["pr"] = ecg_match.group(2)
-            data["ecg"]["rr"] = ecg_match.group(3)
-            data["ecg"]["qrs"] = ecg_match.group(4)
-            data["ecg"]["qt"] = ecg_match.group(5)
+        # Relaxed regex to handle "PR1" or extra spaces
+        # Look for ECG section first
+        ecg_section_match = re.search(r'ECG.*?(?:PI slash sub-I|Laboratory)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        ecg_text = ecg_section_match.group(0) if ecg_section_match else transcript_clean
+
+        ecg_hr = re.search(r'Heart rate\s*(\d{2,3})', ecg_text, re.IGNORECASE)
+        if ecg_hr: data["ecg"]["hr"] = ecg_hr.group(1)
+
+        ecg_pr = re.search(r'PR\w*\s*(\d{2,3})\s*msec', ecg_text, re.IGNORECASE)
+        if ecg_pr: data["ecg"]["pr"] = ecg_pr.group(1)
+
+        ecg_rr = re.search(r'RR\s*(\d{2,4})\s*msec', ecg_text, re.IGNORECASE)
+        if ecg_rr: data["ecg"]["rr"] = ecg_rr.group(1)
+        
+        ecg_qrs = re.search(r'QRS\s*(\d{2,3})\s*msec', ecg_text, re.IGNORECASE)
+        if ecg_qrs: data["ecg"]["qrs"] = ecg_qrs.group(1)
+
+        ecg_qt = re.search(r'QT\s*(\d{2,3})\s*msec', ecg_text, re.IGNORECASE)
+        if ecg_qt: data["ecg"]["qt"] = ecg_qt.group(1)
         
         # ECG Result
-        if re.search(r'Result\s*Normal', transcript_clean, re.IGNORECASE):
+        if re.search(r'Result\s*Normal', ecg_text, re.IGNORECASE):
             data["ecg"]["result"] = "Normal"
         
         # ECG Date
-        ecg_date = re.search(r'ECG.*?(?:Date|Day) performed\s*(.*?)\s+(?:Time|Tom)', transcript_clean, re.IGNORECASE | re.DOTALL)
+        ecg_date = re.search(r'(?:Date|Day) performed\s*([A-Za-z0-9,\s]+?)(?:\.|\s+Time)', ecg_text, re.IGNORECASE | re.DOTALL)
         if ecg_date:
             data["ecg"]["date"] = ecg_date.group(1).strip()
 
         # === Labs Extraction ===
         data["labs"] = {"collected": True}
-        labs_date = re.search(r'Lab.*?(Date|Day) collected\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
+        labs_date = re.search(r'Lab.*?(Date|Day) collected\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4}|[A-Za-z]+\s+\d{1,2},?\s*\d{4})', transcript_clean, re.IGNORECASE | re.DOTALL)
         if labs_date:
             data["labs"]["date"] = labs_date.group(2)
         
-        labs_time = extract_time(r'Lab.*?Time collected\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
+        labs_time = extract_time(r'Lab.*?Time collected\s*(\d{1,2})[\s:o\.]+(\d{1,2})', transcript_clean)
         if labs_time:
             data["labs"]["time"] = labs_time
         
-        urine_time = extract_time(r'Urine collection time\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
+        urine_time = extract_time(r'Urine collection time\s*(\d{1,2})[\s:o\.]+(\d{1,2})', transcript_clean)
         if urine_time:
             data["labs"]["urine_time"] = urine_time
 
@@ -719,48 +766,217 @@ class LocalAIService:
         if preg_result:
             data["pregnancy"]["result"] = preg_result.group(1).capitalize()
         
-        preg_date = re.search(r'Collection date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE)
+        preg_date = re.search(r'Collection date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4}|[A-Za-z]+\s+\d{1,2},?\s*\d{4})', transcript_clean, re.IGNORECASE)
         if preg_date:
             data["pregnancy"]["date"] = preg_date.group(1)
         
-        preg_time = extract_time(r'Collection time\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
+        preg_time = extract_time(r'Collection time\s*(\d{1,2})[\s:o\.]+(\d{1,2})', transcript_clean)
         if preg_time:
             data["pregnancy"]["time"] = preg_time
 
         # === Injection 1 Extraction ===
-        # More flexible pattern: "anatomic" or "anatomical", flexible spacing
-        inj1_match = re.search(r'Injection\s*1.*?dose administered\s*(\d+)\s*ml.*?anatom\w+\s+location\s+(\w+).*?laterality\s+([\w\s]+?)\s+(route|start)', transcript_clean, re.IGNORECASE | re.DOTALL)
-        if inj1_match:
-            data["injection"] = {
-                "dose": inj1_match.group(1) + " mL",
-                "site": inj1_match.group(2),
-                "laterality": inj1_match.group(3).strip()
-            }
+        # Split text into Injection sections
+        inj1_text = ""
+        inj2_text = ""
         
-        inj1_time_str = extract_time(r'Injection\s*1.*?Start time\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
-        if inj1_time_str and "injection" in data:
-            data["injection"]["start_time"] = inj1_time_str
+        parts = re.split(r'Injection\s*\d', transcript_clean, flags=re.IGNORECASE)
+        # parts[0] is pre-injection, parts[1] is Inj 1, parts[2] is Inj 2 (if exists)
+        if len(parts) > 1:
+            inj1_text = parts[1]
         
-        inj1_date = re.search(r'Injection\s*1.*?Start date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
-        if inj1_date and "injection" in data:
-            data["injection"]["start_date"] = inj1_date.group(1)
+        if len(parts) > 2:
+            inj2_text = parts[2]
+            
+        # Helper for injection fields
+        def extract_injection(text):
+            inj_data = {}
+            dose_m = re.search(r'Dose administered\s*(\d+[\.]?\d*)\s*mL', text, re.IGNORECASE)
+            if dose_m: inj_data["dose"] = dose_m.group(1) + " mL"
+            
+            site_m = re.search(r'location\s+([A-Za-z]+)', text, re.IGNORECASE)
+            if site_m: inj_data["site"] = site_m.group(1)
+            
+            lat_m = re.search(r'Laterality\s+([A-Za-z\s]+?)(?:\.|Route|Start)', text, re.IGNORECASE)
+            if lat_m: inj_data["laterality"] = lat_m.group(1).strip()
+            
+            date_m = re.search(r'Start date\s*([A-Za-z0-9,\s]+)', text, re.IGNORECASE)
+            if date_m: inj_data["start_date"] = date_m.group(1).strip()
+            
+            time_m = extract_time(r'Start time\s*(\d{1,2})[\s:o\.]+(\d{1,2})', text)
+            if time_m: inj_data["start_time"] = time_m
+            
+            return inj_data
+
+        if inj1_text:
+            data["injection"] = extract_injection(inj1_text)
 
         # === Injection 2 Extraction ===
-        # More flexible pattern: "anatomic" or "anatomical", flexible spacing
-        inj2_match = re.search(r'Injection\s*2.*?dose administered\s*(\d+)\s*ml.*?anatom\w+\s+location\s+(\w+).*?laterality\s+([\w\s]+?)\s+(route|start)', transcript_clean, re.IGNORECASE | re.DOTALL)
-        if inj2_match:
-            data["injection_2"] = {
-                "dose": inj2_match.group(1) + " mL",
-                "site": inj2_match.group(2),
-                "laterality": inj2_match.group(3).strip()
-            }
-        
-        inj2_time_str = extract_time(r'Injection\s*2.*?Start time\s*(\d{1,2})[\s:o]+(\d{1,2})', transcript_clean)
-        if inj2_time_str and "injection_2" in data:
-            data["injection_2"]["start_time"] = inj2_time_str
-        
-        inj2_date = re.search(r'Injection 2.*?Start date\s*(\d{1,2}\s+[A-Za-z]+\s+\d{2,4})', transcript_clean, re.IGNORECASE | re.DOTALL)
-        if inj2_date and "injection_2" in data:
-            data["injection_2"]["start_date"] = inj2_date.group(1)
+        if inj2_text:
+            data["injection_2"] = extract_injection(inj2_text)
             
         return data
+
+class LocalWhisperService:
+    @staticmethod
+    def transcribe_audio(audio_file, model=None, streaming_callback=None) -> str:
+        try:
+            from faster_whisper import WhisperModel
+            import tempfile
+            import os
+            
+            # Configuration
+            model_size = "medium" # or "large-v3"
+            # Check for CUDA
+            import logging
+            from tqdm import tqdm
+            import time
+
+            # Configure Logging
+            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+            logger = logging.getLogger(__name__)
+
+            if model is None:
+                # Configuration
+                model_size = "medium" # or "large-v3"
+                # Check for CUDA
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                compute_type = "float16" if device == "cuda" else "int8"
+                
+                logger.info(f"Loading local Faster-Whisper model ({model_size}) on {device} with {compute_type}...")
+                model = WhisperModel(model_size, device=device, compute_type=compute_type)
+            else:
+                logger.info("Using cached Faster-Whisper model.")
+
+            # Helper to save uploaded file to temp path
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                if hasattr(audio_file, 'seek'):
+                     audio_file.seek(0)
+                     file_bytes = audio_file.read()
+                     tmp_file.write(file_bytes)
+                elif isinstance(audio_file, str):
+                    # If it's a path string
+                    with open(audio_file, 'rb') as f:
+                        tmp_file.write(f.read())
+            
+            logger.info(f"Transcribing {tmp_path} with Faster-Whisper...")
+            
+            # Using beam_size 5 as requested implicitly by earlier context or default
+            segments, info = model.transcribe(tmp_path, beam_size=5)
+            
+            logger.info(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
+            logger.info(f"Audio duration: {info.duration}s")
+
+            # Collect segments with progress bar and streaming
+            transcript_parts = []
+            
+            # We can use the duration to estimate progress if we wanted, but simple count is safer
+            total_duration = int(info.duration) if info.duration else None
+            with tqdm(total=total_duration, unit="sec", desc="Transcription Progress") as pbar:
+                last_pos = 0
+                for segment in segments:
+                    transcript_parts.append(segment.text)
+                    
+                    # Call streaming callback with accumulated transcript
+                    if streaming_callback:
+                        accumulated_text = "".join(transcript_parts).strip()
+                        try:
+                            streaming_callback(accumulated_text)
+                        except Exception as e:
+                            logger.warning(f"Streaming callback error: {e}")
+                    
+                    # Update progress bar based on segment end time
+                    current_pos = segment.end
+                    pbar.update(int(current_pos - last_pos))
+                    last_pos = current_pos
+                
+                # Ensure progress bar reaches 100% even if last segment ends early
+                if total_duration and last_pos < total_duration:
+                    pbar.update(total_duration - int(last_pos))
+                    
+            full_transcript = "".join(transcript_parts).strip()
+            logger.info(f"Transcription complete. Length: {len(full_transcript)} chars.")
+            
+            # Cleanup
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+            
+            # Format transcript with speakers (reuse LocalAIService helper)
+            formatted = LocalAIService._format_transcript_with_speakers(full_transcript)
+            
+            # Final callback with formatted transcript
+            if streaming_callback:
+                try:
+                    streaming_callback(formatted)
+                except Exception as e:
+                    logger.warning(f"Final streaming callback error: {e}")
+            
+            return formatted
+            
+        except ImportError:
+            return "Error: faster-whisper not installed. Please run: pip install faster-whisper"
+        except Exception as e:
+            return f"Error running local Faster-Whisper: {e}"
+
+    @staticmethod
+    def extract_data(transcript: str) -> dict:
+        # Reuse the Regex/rule-based extraction from LocalAIService
+        # This ensures we don't need an LLM for this step.
+        return LocalAIService.extract_data(transcript)
+
+class GeminiAIService:
+    """Service for using Google Gemini 2.0 Flash for accurate, non-deterministic form extraction"""
+    
+    def __init__(self, api_key: str):
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            # Use gemini-2.0-flash - confirmed available via list_models
+            self.model = genai.GenerativeModel('gemini-2.0-flash')
+        except ImportError:
+            raise ImportError("google-generativeai not installed. Run: pip install google-generativeai")
+    
+    def extract_data(self, transcript: str) -> dict:
+        """Extract structured data from transcript using Gemini 2.0 Flash with overflow capture"""
+        
+        prompt = ENHANCED_PROMPT_TEMPLATE.format(transcript=transcript)
+
+
+        try:
+            # Use temperature=0.7 for non-deterministic but still accurate extraction
+            response = self.model.generate_content(
+                prompt,
+                generation_config={
+                    'temperature': 0.7,
+                    'top_p': 0.95,
+                    'top_k': 40,
+                    'max_output_tokens': 3072,  # Increased for overflow content
+                }
+            )
+            
+            # Extract JSON from response
+            response_text = response.text.strip()
+            
+            # Remove markdown code blocks if present
+            if response_text.startswith('```'):
+                # Find the first newline after ```
+                start = response_text.find('\n')
+                # Find the closing ```
+                end = response_text.rfind('```')
+                if start != -1 and end != -1:
+                    response_text = response_text[start+1:end].strip()
+            
+            # Parse JSON
+            data = json.loads(response_text)
+            return data
+            
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON from Gemini response: {e}")
+            print(f"Response text: {response_text}")
+            raise
+        except Exception as e:
+            print(f"Error calling Gemini API: {e}")
+            raise

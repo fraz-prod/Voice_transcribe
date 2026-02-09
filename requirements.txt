@@ -10,4 +10,7 @@ numpy
 requests
 tqdm
 pydub
-audioop-lts
+openai-whisper
+torch
+faster-whisper
+google-generativeai

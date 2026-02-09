@@ -1,0 +1,93 @@
+Nurse: Hello. This is your Astra STAR-0215-301 Day 1 visit. I will complete all required source documentation with you. Please confirm your Subject Initials, Subject ID, and today’s date.
+Patient:Hi, I was driving my lexus last night, i had a great dinner . i also watched Star Wars last night Initials A.K., Subject ID 0215-301, Date 26 January 2026.
+Nurse: Visit Date is 26 January 2026. Was the visit performed today?
+Patient: Yes, the visit was performed today.
+Nurse: Thank you. We will begin with Patient Reported Outcomes. Did you complete EQ-5D-5L?
+Patient: Yes.
+Nurse: Did you complete WPAI-GH?
+Patient: Yes.
+Nurse: Did you complete AE-QoL?
+Patient: Yes.
+Nurse: Did you complete AECT?
+Patient: Yes.
+Nurse: Did you complete TQSM?
+Patient: Yes.
+Nurse: Moving to HAE attack diary compliance. Since your last visit, did you complete all weekly diary entries?
+Patient: Yes, all weekly entries were completed.
+Nurse: Were you contacted for all HAE attacks reported since your last visit?
+Patient: Yes.
+Nurse: Any additional notes regarding attacks?
+Patient: I had two confirmed attacks during run-in. No new attacks since last contact.
+Nurse: Noted.
+Nurse: Adverse Events. Were AEs reviewed at this visit?
+Patient: Yes.
+Nurse: Any new adverse events reported?
+Patient: No new adverse events.
+Nurse: Concomitant Medications. Were conmeds reviewed?
+Patient: Yes.
+Nurse: Any new or changes to concomitant medications?
+Patient: No changes.
+Nurse: Prior HAE Prophylaxis. What HAE medications have you taken previously?
+Patient: I was on Takhzyro for long-term prophylaxis. Before that, I tried Orladeyo briefly. I've also used Cinryze and Berinert for on-demand treatment.
+Nurse: When was your last dose of Takhzyro?
+Patient: Last dose of Takhzyro was January 15, 2026.
+Nurse: And when did you stop Orladeyo?
+Patient: I stopped Orladeyo on December 20, 2025.
+Nurse: What about Cinryze and Berinert - when were those last used?
+Patient: Last Cinryze dose was January 20, 2026, and last Berinert was January 10, 2026.
+Nurse: Thank you. The system will calculate the required washout periods for each medication.
+Nurse: Inclusion/Exclusion Criteria. Were all eligibility criteria met, including at least two investigator-confirmed HAE attacks during run-in period?
+Patient: Yes.
+Nurse: Did you continue to meet eligibility at Day 1 visit?
+Patient: Yes.
+Nurse: Randomization. Was the subject randomized in IRT?
+Patient: Yes.
+Nurse: Physical Examination Pre-dose. Was physical exam completed?
+Patient: Yes.
+Nurse: Time collected 09:45. Now recording vital signs pre-dose. Time at rest 09:40. Time 09:45. Weight 78 kg. Blood pressure 118/76 taken on left arm. Heart rate 72 bpm. Temperature 36.8 C. Respiratory rate 16 breaths per minute. Any clinically significant abnormalities?
+Patient: No.
+Nurse: PI/Sub-I will review and sign with date 26 January 2026.
+Nurse: ECG. Was 12-lead ECG performed?
+Patient: Yes.
+Nurse: Date performed 26 January 2026. Time at rest 09:50. Time performed 09:55. Heart rate 72 BPM. PR 160 msec. RR 833 msec. QRS 90 msec. QT 380 msec. Result Normal, not clinically significant. No abnormalities requiring specification. PI/Sub-I will review and sign dated 26 January 2026.
+Nurse: Laboratory assessments. Were all required labs collected?
+Patient: Yes.
+Nurse: Date collected 26 January 2026. Time collected 09:30. Urine collection time 09:25. Optional pharmacogenetics sample collected?
+Patient: No.
+Nurse: Reason documented per protocol as optional not consented.
+Nurse: Pregnancy test. Is subject of childbearing potential?
+Patient: Yes.
+Nurse: Was urine sample collected?
+Patient: Yes.
+Nurse: Collection date 26 January 2026. Collection time 09:25. Result Negative.
+Coordinator: Before we proceed to the injection, do you have any questions or concerns today?
+Patient: Well, actually yes. I've been a bit worried about my blood sugar levels lately. My father has diabetes, and I've noticed I've been feeling a bit more thirsty than usual. Is that something I should be concerned about during this study?
+Coordinator: That's important to mention. We're not specifically monitoring blood sugar in this protocol, but I'll make a note of your concern. You might want to discuss this with your primary care physician. Have you noticed any other symptoms?
+Patient: Not really major symptoms, but I did feel unusually fatigued last week - not anything serious, just more tired than normal. It only lasted two days though and I'm fine now. I didn't think it was worth reporting as an adverse event.
+Coordinator: I appreciate you mentioning that. Even if it seems minor, it's good to keep track. Now, about medications - are you still taking only the medications we discussed at screening?
+Patient: Yes, but I wanted to ask - I have seasonal allergies coming up in spring. Can I take my regular antihistamine if needed? I usually take cetirizine. Will that interfere with the study drug?
+Coordinator: Good question. Let me check the protocol... Antihistamines are generally permitted for minor conditions. But please contact us before taking anything new so we can verify it's allowed. Moving forward with the injection now.
+Nurse: Investigational Product Administration. Lot number and expiration date verified and recorded in source. Was investigational product administered?
+Patient: Yes.
+Nurse: Prescribed dose 2 mL.
+Nurse: Injection 1. Kit number  KLJK342 . Dose administered 2 mL. Anatomical location abdomen. Laterality left lower quadrant. Route subcutaneous. Start date 26 January 2026. Start time 10:05. Was injection interrupted?
+Patient: No.
+Nurse: Injection 2. Kit number KLJK1256 . Dose administered 4 mL. Anatomical location abdomen. Laterality right lower quadrant. Route subcutaneous. Start date 26 January 2026. Start time 10:08. Was injection interrupted?
+Patient: No.
+Nurse: Unblinded staff administration signature and date completed in source.
+Nurse: Physical Examination 1 hour post-dose plus or minus 15 minutes. Was physical exam completed?
+Patient: Yes.
+Nurse: Time collected 11:10. Vital signs 1 hour post-dose. Time at rest 11:05. Time 11:10. Weight 78 kg. Blood pressure 120/78 left arm. Heart rate 70 bpm. Temperature 36.7 C. Respiratory rate 16 breaths per minute. Any clinically significant abnormalities?
+Patient: No.
+Nurse: PI/Sub-I reviewed dated 26 January 2026.
+Nurse: Participant ID card. Was subject provided with participant ID card?
+Patient: Yes.
+Nurse: Continuing. Will the participant continue in the study?
+Patient: Yes.
+Nurse: Will the participant continue with the treatment period?
+Patient: Yes.
+Nurse: Notes: Mild injection site tenderness after first injection resolved within 20 minutes. No intervention required.
+Nurse: Study Coordinator completing source contemporaneously. Signature recorded. Date 26 January 2026. PI reviewed and signed with date 26 January 2026.
+Nurse: That completes all Day 1 documentation. Do you have any questions?
+Patient: No questions.
+Nurse: Thank you. Visit complete.
