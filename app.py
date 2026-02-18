@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from logic import WashoutCalculator, RuleEngine
-from ai_services import MockAIService, RealAIService, LocalAIService, LocalWhisperService, GeminiAIService
+from ai_services import MockAIService, RealAIService, LocalAIService, LocalWhisperService, GeminiAIService, Chirp3GeminiService
 from form_filler import FormFiller
 import os
 
@@ -40,7 +40,7 @@ if check_model_initialized():
 
 # Sidebar for controls
 st.sidebar.header("Controls")
-mode = st.sidebar.selectbox("Mode", ["Mock Mode", "Local Mode (No LLM)", "Local Whisper Mode (No API Key)", "Gemini Mode (Gemini API)", "Live Mode (Requires API Key)"])
+mode = st.sidebar.selectbox("Mode", ["Mock Mode", "Local Mode (No LLM)", "Local Whisper Mode (No API Key)", "Gemini Mode (Gemini API)", "Chirp 3 Mode (Google Cloud)", "Live Mode (Requires API Key)"])
 
 # Pre-load Whisper model if in Whisper mode
 if mode == "Local Whisper Mode (No API Key)":
@@ -57,6 +57,13 @@ if mode == "Mock Mode":
 
 api_key = None
 gemini_api_key = None
+gcp_project_id = None
+gcp_region = "us"
+gcp_credentials_path = None
+
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 if mode == "Live Mode (Requires API Key)":
     api_key = st.sidebar.text_input("OpenAI API Key", type="password")
@@ -64,14 +71,37 @@ if mode == "Live Mode (Requires API Key)":
         st.warning("Please enter your API Key to use Live Mode.")
 
 if mode == "Gemini Mode (Gemini API)":
-    # Try to load from .env first
-    import os
-    from dotenv import load_dotenv
-    load_dotenv()
     default_key = os.getenv("GEMINI_API_KEY", "")
     gemini_api_key = st.sidebar.text_input("Gemini API Key", value=default_key, type="password")
     if not gemini_api_key:
         st.warning("Please enter your Gemini API Key to use Gemini Mode.")
+    st.sidebar.divider()
+    st.sidebar.subheader("📄 Protocol Document (Optional)")
+    uploaded_protocol = st.sidebar.file_uploader(
+        "Upload Protocol PDF for smarter extraction",
+        type=["pdf"],
+        key="sidebar_protocol_pdf",
+        help="The protocol text will be sent to Gemini alongside the transcript for more accurate, protocol-aware extraction."
+    )
+    if uploaded_protocol:
+        st.sidebar.success(f"✅ Protocol loaded: {uploaded_protocol.name}")
+
+if mode == "Chirp 3 Mode (Google Cloud)":
+    st.sidebar.subheader("Google Cloud Settings")
+    default_gemini_key = os.getenv("GEMINI_API_KEY", "")
+    gemini_api_key = st.sidebar.text_input("Gemini API Key", value=default_gemini_key, type="password", key="chirp_gemini_key")
+    gcp_project_id = st.sidebar.text_input("GCP Project ID", value=os.getenv("GOOGLE_CLOUD_PROJECT", ""), key="gcp_project")
+    gcp_region = st.sidebar.selectbox("GCP Region", Chirp3GeminiService.SUPPORTED_REGIONS, index=0, key="gcp_region")
+    gcp_credentials_path = st.sidebar.text_input(
+        "Service Account JSON Path (optional)",
+        value=os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
+        help="Leave blank if using Application Default Credentials",
+        key="gcp_creds"
+    )
+    if not gemini_api_key:
+        st.warning("Please enter your Gemini API Key.")
+    if not gcp_project_id:
+        st.warning("Please enter your GCP Project ID.")
 
 col1, col2 = st.columns(2)
 
@@ -157,17 +187,80 @@ with col1:
                             with st.spinner("🔄 Loading Whisper model for transcription..."):
                                 whisper_model = get_faster_whisper_model()
                         
-                        with st.spinner("🎙️ Transcribing audio..."):
-                            transcript = LocalWhisperService.transcribe_audio(uploaded_file, model=whisper_model)
+                        # Live streaming transcript placeholder
+                        transcript_placeholder = st.empty()
+                        transcript_placeholder.info("🎙️ Transcribing audio... Live transcript will appear below.")
+                        
+                        transcript = LocalWhisperService.transcribe_audio(
+                            uploaded_file,
+                            model=whisper_model,
+                            streaming_callback=lambda text: transcript_placeholder.text_area(
+                                "🎙️ Live Transcript (Streaming)",
+                                text,
+                                height=300,
+                                key=f"gemini_stream_{len(text)}"
+                            )
+                        )
+                        transcript_placeholder.empty()  # Clear live view once done
                     
-                    # Use Gemini for extraction
+                    # Parse protocol PDF if uploaded
+                    protocol_text = ""
+                    if uploaded_protocol:
+                        with st.spinner("📄 Reading protocol document..."):
+                            protocol_text = GeminiAIService.parse_protocol_pdf(uploaded_protocol)
+                        st.info(f"📄 Protocol loaded — {len(protocol_text):,} characters extracted. Gemini will cross-reference this.")
+
+                    # Use Gemini for extraction (with optional protocol context)
                     with st.spinner("🤖 Extracting data with Gemini AI..."):
-                        extracted_data = service.extract_data(transcript)
+                        extracted_data = service.extract_data(transcript, protocol_text=protocol_text)
                 except ImportError as e:
                     st.error("❌ google-generativeai not installed. Please run: pip install google-generativeai")
                     st.stop()
                 except Exception as e:
                     st.error(f"Error calling Gemini API: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+                    st.stop()
+
+            elif mode == "Chirp 3 Mode (Google Cloud)":
+                # Chirp 3 + Gemini 2.5 Flash Mode
+                if not gemini_api_key:
+                    st.error("Gemini API Key missing.")
+                    st.stop()
+                if not gcp_project_id:
+                    st.error("GCP Project ID missing.")
+                    st.stop()
+
+                try:
+                    service = Chirp3GeminiService(
+                        gemini_api_key=gemini_api_key,
+                        project_id=gcp_project_id,
+                        region=gcp_region,
+                        credentials_path=gcp_credentials_path or None,
+                    )
+
+                    if uploaded_file.name.endswith(".txt"):
+                        transcript = uploaded_file.read().decode("utf-8")
+                    else:
+                        status_placeholder = st.empty()
+                        def update_status(msg):
+                            status_placeholder.info(f"🎙️ {msg}")
+
+                        transcript = service.transcribe_audio(
+                            uploaded_file,
+                            progress_callback=update_status
+                        )
+                        status_placeholder.empty()
+
+                    with st.spinner("🤖 Extracting data with Gemini 2.5 Flash..."):
+                        extracted_data = service.extract_data(transcript)
+
+                except ImportError as e:
+                    st.error(f"❌ Missing dependency: {e}")
+                    st.info("Run: pip install google-cloud-speech google-generativeai")
+                    st.stop()
+                except Exception as e:
+                    st.error(f"Error in Chirp 3 Mode: {e}")
                     import traceback
                     st.code(traceback.format_exc())
                     st.stop()
@@ -211,7 +304,111 @@ with col2:
     
     if 'extracted_data' in st.session_state:
         data = st.session_state['extracted_data']
-        
+
+        # --- Overflow / Validation Warnings ---
+        validation = data.get("validation", {})
+        overflow = data.get("overflow_information", {})
+        has_overflow = any(overflow.get(k) for k in [
+            "patient_concerns", "medication_questions",
+            "unreported_symptoms", "safety_observations", "other_clinical_notes"
+        ])
+
+        if validation:
+            score = validation.get("completeness_score", 100)
+            if score >= 90:
+                st.success(f"✅ Data completeness: {score}%")
+            elif score >= 70:
+                st.warning(f"⚠️ Data completeness: {score}% — review recommended")
+            else:
+                st.error(f"🔴 Data completeness: {score}% — manual review required")
+
+        if has_overflow:
+            with st.expander("⚠️ Additional Medical Information Captured (Beyond Protocol Fields)", expanded=True):
+                if overflow.get("patient_concerns"):
+                    st.markdown("**Patient Concerns:**")
+                    for c in overflow["patient_concerns"]:
+                        st.markdown(f"- {c}")
+                if overflow.get("medication_questions"):
+                    st.markdown("**Medication Questions:**")
+                    for q in overflow["medication_questions"]:
+                        st.markdown(f"- {q}")
+                if overflow.get("unreported_symptoms"):
+                    st.markdown("**Unreported Symptoms (not logged as AE):**")
+                    for s in overflow["unreported_symptoms"]:
+                        st.markdown(f"- {s}")
+                if overflow.get("safety_observations"):
+                    st.markdown("**Safety Observations:**")
+                    for o in overflow["safety_observations"]:
+                        st.markdown(f"- {o}")
+                if overflow.get("other_clinical_notes"):
+                    st.markdown("**Other Clinical Notes:**")
+                    for n in overflow["other_clinical_notes"]:
+                        st.markdown(f"- {n}")
+
+        if validation.get("flags"):
+            st.warning("**Flags:** " + " | ".join(validation["flags"]))
+
+        # --- Protocol Compliance Section ---
+        protocol_compliance = data.get("protocol_compliance", {})
+        if protocol_compliance:
+            st.divider()
+            st.subheader("📋 Protocol Compliance Check")
+
+            visit_type = protocol_compliance.get("visit_type_detected", "Unknown")
+            st.info(f"**Visit Type Detected:** {visit_type}")
+
+            # Protocol compliance score
+            compliance_score = validation.get("protocol_compliance_score")
+            if compliance_score is not None:
+                if compliance_score >= 90:
+                    st.success(f"✅ Protocol Compliance Score: {compliance_score}%")
+                elif compliance_score >= 70:
+                    st.warning(f"⚠️ Protocol Compliance Score: {compliance_score}%")
+                else:
+                    st.error(f"🔴 Protocol Compliance Score: {compliance_score}%")
+
+            # Missing items — the most important part
+            missing = protocol_compliance.get("missing_from_transcript", [])
+            if missing:
+                with st.expander(f"🔴 GAPS: {len(missing)} Protocol-Required Items Missing from Transcript", expanded=True):
+                    for item in missing:
+                        st.error(f"❌ {item}")
+            else:
+                st.success("✅ All protocol-required items were found in the transcript.")
+
+            # Found items
+            found = protocol_compliance.get("found_in_transcript", [])
+            if found:
+                with st.expander(f"✅ {len(found)} Protocol-Required Items Found", expanded=False):
+                    for item in found:
+                        st.markdown(f"- ✅ {item}")
+
+            # Eligibility criteria
+            elig = protocol_compliance.get("eligibility_criteria_checked", {})
+            if elig:
+                with st.expander("🔍 Eligibility Criteria Check", expanded=False):
+                    if elig.get("inclusion_met"):
+                        st.markdown("**Inclusion Criteria Met:**")
+                        for item in elig["inclusion_met"]:
+                            st.markdown(f"- ✅ {item}")
+                    if elig.get("inclusion_not_confirmed"):
+                        st.markdown("**Inclusion Criteria NOT Confirmed (needs verification):**")
+                        for item in elig["inclusion_not_confirmed"]:
+                            st.markdown(f"- ⚠️ {item}")
+                    if elig.get("exclusion_clear"):
+                        st.markdown("**Exclusion Criteria Clear:**")
+                        for item in elig["exclusion_clear"]:
+                            st.markdown(f"- ✅ {item}")
+                    if elig.get("exclusion_flagged"):
+                        st.markdown("**Exclusion Criteria FLAGGED (needs review):**")
+                        for item in elig["exclusion_flagged"]:
+                            st.markdown(f"- 🔴 {item}")
+
+            # Washout compliance
+            washout = protocol_compliance.get("washout_compliance", "")
+            if washout:
+                st.info(f"💊 **Washout Compliance:** {washout}")
+
         st.subheader("Extracted Data")
         st.json(data)
         
@@ -228,6 +425,9 @@ with col2:
         
         st.subheader("Washout Calculator")
         
+        # Get protocol-extracted washout periods (from Gemini) if available
+        protocol_washout = data.get("protocol_compliance", {}).get("washout_periods", [])
+        
         # Check for last_dose data and medications
         last_dose = data.get("last_dose")
         medications = data.get("medications", [])
@@ -240,16 +440,19 @@ with col2:
                 try:
                     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
                 except ValueError:
-                    # Try other formats
                     try:
                         date_obj = datetime.strptime(date_str, "%d %B %Y")
                     except ValueError:
                         date_obj = datetime.strptime(date_str, "%B %d, %Y")
                 
-                washout_info = WashoutCalculator.calculate_end_date(ld["medication"], date_obj)
+                washout_info = WashoutCalculator.calculate_end_date(ld["medication"], date_obj, protocol_washout)
                 
                 st.info(f"💊 Medication: {washout_info['medication']}")
                 st.info(f"⏱️ Washout Period: {washout_info['washout_days']} days")
+                if washout_info.get("source") == "protocol":
+                    st.success(f"📋 Source: **Protocol Document** (protocol-defined washout)")
+                else:
+                    st.warning(f"📋 Source: **Default/Hardcoded** (no protocol washout data found for this medication)")
                 st.success(f"📅 Earliest Run-In Date: {washout_info['end_date'].strftime('%Y-%m-%d')}")
             except Exception as e:
                 st.error(f"Error calculating washout: {e}")
@@ -263,9 +466,8 @@ with col2:
         st.divider()
         st.header("3. Source Document Generation")
         
-        # File Uploaders for Protocol and Template
+        # File Uploader for Template
         st.subheader("Configuration")
-        uploaded_protocol = st.file_uploader("Upload Protocol (PDF)", type=["pdf"])
         uploaded_template = st.file_uploader("Upload Form Template (DOCX)", type=["docx"])
 
         # Default template path

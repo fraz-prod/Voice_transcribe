@@ -935,48 +935,401 @@ class GeminiAIService:
             import google.generativeai as genai
             genai.configure(api_key=api_key)
             # Use gemini-2.0-flash - confirmed available via list_models
-            self.model = genai.GenerativeModel('gemini-2.0-flash')
+            self.model = genai.GenerativeModel('gemini-2.5-flash')
         except ImportError:
             raise ImportError("google-generativeai not installed. Run: pip install google-generativeai")
     
-    def extract_data(self, transcript: str) -> dict:
-        """Extract structured data from transcript using Gemini 2.0 Flash with overflow capture"""
+    @staticmethod
+    def parse_protocol_pdf(pdf_file) -> str:
+        """Extract text from an uploaded protocol PDF using pypdf."""
+        from pypdf import PdfReader
+        import io as _io
+        pdf_file.seek(0)
+        reader = PdfReader(_io.BytesIO(pdf_file.read()))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n\n".join(pages).strip()
+    
+    def extract_data(self, transcript: str, protocol_text: str = "") -> dict:
+        """Extract structured data from transcript using Gemini Flash with overflow capture.
         
-        prompt = ENHANCED_PROMPT_TEMPLATE.format(transcript=transcript)
+        Args:
+            transcript: The clinical visit transcript text.
+            protocol_text: Optional protocol document text for cross-referencing.
+        """
+        import re
 
+        # Cap protocol text to avoid consuming the entire context window
+        MAX_PROTOCOL_CHARS = 30000
+        if protocol_text and len(protocol_text) > MAX_PROTOCOL_CHARS:
+            protocol_text = protocol_text[:MAX_PROTOCOL_CHARS] + "\n\n[... protocol truncated for context limit ...]"
 
-        try:
-            # Use temperature=0.7 for non-deterministic but still accurate extraction
-            response = self.model.generate_content(
-                prompt,
+        def _build_prompt(proto_text: str) -> str:
+            return ENHANCED_PROMPT_TEMPLATE.format(
+                transcript=transcript,
+                protocol_context=proto_text if proto_text else "No protocol document provided."
+            )
+
+        def _call_gemini(prompt_text: str, temperature=0.7):
+            return self.model.generate_content(
+                prompt_text,
                 generation_config={
-                    'temperature': 0.7,
+                    'temperature': temperature,
                     'top_p': 0.95,
                     'top_k': 40,
-                    'max_output_tokens': 3072,  # Increased for overflow content
+                    'max_output_tokens': 16384,
+                    'response_mime_type': 'application/json',
                 }
             )
+
+        def _extract_json(raw: str) -> str:
+            """Pull JSON out of any markdown-wrapped response."""
+            raw = raw.strip()
+            if not raw:
+                return ""
+            fence_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if fence_match:
+                return fence_match.group(1).strip()
+            if raw.startswith('```'):
+                lines = raw.split('\n')
+                inner = '\n'.join(lines[1:])
+                last_fence = inner.rfind('```')
+                if last_fence != -1:
+                    inner = inner[:last_fence]
+                return inner.strip()
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                return raw[start:end+1].strip()
+            return raw
+
+        def _repair_json(text: str) -> str:
+            """Attempt to repair common Gemini JSON issues."""
+            # Remove trailing commas before } or ]
+            text = re.sub(r',\s*([\]}])', r'\1', text)
             
-            # Extract JSON from response
+            # Count open/close braces and brackets
+            open_braces = text.count('{') - text.count('}')
+            open_brackets = text.count('[') - text.count(']')
+            
+            # If truncated mid-string, close the string
+            # Find if we have an unclosed quote
+            in_string = False
+            escape_next = False
+            for ch in text:
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == '\\':
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+            
+            if in_string:
+                text = text.rstrip()
+                text += '"'
+            
+            # Close any unclosed brackets/braces
+            text = text.rstrip().rstrip(',')
+            for _ in range(open_brackets):
+                text += ']'
+            for _ in range(open_braces):
+                text += '}'
+            
+            return text
+
+        def _try_parse(raw_text: str) -> dict:
+            """Try to parse JSON from raw response, with repair fallback."""
+            response_text = _extract_json(raw_text)
+            if not response_text:
+                raise ValueError(f"No JSON found in response.\nRaw: {raw_text[:500]}")
+
+            # First try: direct parse
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError:
+                pass
+
+            # Second try: repair and parse
+            repaired = _repair_json(response_text)
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"JSON parse failed even after repair: {e}\n\n"
+                    f"Response snippet: {response_text[:500]}"
+                ) from e
+
+        # === Main extraction flow ===
+        prompt = _build_prompt(protocol_text)
+
+        try:
+            response = _call_gemini(prompt, temperature=0.7)
+            raw_text = response.text if response.text else ""
+
+            if not raw_text.strip():
+                print("Warning: empty response. Retrying with temperature=0.3...")
+                response = _call_gemini(prompt, temperature=0.3)
+                raw_text = response.text if response.text else ""
+
+            if not raw_text.strip():
+                raise ValueError("Gemini returned an empty response after retry.")
+
+            # Try to parse
+            try:
+                return _try_parse(raw_text)
+            except ValueError:
+                # If protocol was included, retry WITHOUT it (protocol may be too large)
+                if protocol_text:
+                    print("Warning: JSON parse failed with protocol. Retrying without protocol text...")
+                    fallback_prompt = _build_prompt("")
+                    response = _call_gemini(fallback_prompt, temperature=0.3)
+                    raw_text = response.text if response.text else ""
+                    if raw_text.strip():
+                        return _try_parse(raw_text)
+                raise
+
+        except Exception as e:
+            print(f"Error in Gemini extraction: {e}")
+            raise
+
+
+class Chirp3GeminiService:
+    """
+    Service using Google Cloud Speech-to-Text V2 (Chirp 3) for STT
+    and Gemini 2.5 Flash for data extraction with overflow capture.
+
+    Requirements:
+        pip install google-cloud-speech google-generativeai
+
+    Authentication (one of):
+        - Set GOOGLE_APPLICATION_CREDENTIALS env var to path of service account JSON
+        - Pass credentials_json (path or dict) to __init__
+        - Use Application Default Credentials (gcloud auth application-default login)
+    """
+
+    SUPPORTED_REGIONS = ["us", "eu", "asia-northeast1", "asia-southeast1",
+                         "asia-south1", "europe-west2", "europe-west3",
+                         "northamerica-northeast1"]
+
+    def __init__(self, gemini_api_key: str, project_id: str,
+                 region: str = "us", credentials_path: str = None):
+        """
+        Args:
+            gemini_api_key: Gemini API key for extraction
+            project_id: Google Cloud project ID
+            region: GCP region for Speech-to-Text (default: "us")
+            credentials_path: Optional path to service account JSON file
+        """
+        self.project_id = project_id
+        self.region = region
+
+        # --- Set up Google Cloud credentials ---
+        if credentials_path:
+            import os
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+
+        # --- Set up Speech client ---
+        try:
+            from google.cloud.speech_v2 import SpeechClient
+            from google.api_core.client_options import ClientOptions
+            self.speech_client = SpeechClient(
+                client_options=ClientOptions(
+                    api_endpoint=f"{region}-speech.googleapis.com"
+                )
+            )
+        except ImportError:
+            raise ImportError(
+                "google-cloud-speech not installed. Run: pip install google-cloud-speech"
+            )
+
+        # --- Set up Gemini 2.5 Flash ---
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=gemini_api_key)
+            self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+        except ImportError:
+            raise ImportError(
+                "google-generativeai not installed. Run: pip install google-generativeai"
+            )
+
+    def transcribe_audio(self, audio_file, progress_callback=None) -> str:
+        """
+        Transcribe audio using Chirp 3 via Google Cloud Speech-to-Text V2.
+
+        Args:
+            audio_file: File-like object or path string to audio file
+            progress_callback: Optional callable(status_str) for UI updates
+
+        Returns:
+            Full transcript as a string (with speaker labels if diarization enabled)
+        """
+        from google.cloud.speech_v2.types import cloud_speech
+
+        if progress_callback:
+            progress_callback("Reading audio file...")
+
+        # Read audio bytes
+        if hasattr(audio_file, 'read'):
+            audio_bytes = audio_file.read()
+            # Reset if possible
+            if hasattr(audio_file, 'seek'):
+                audio_file.seek(0)
+        else:
+            with open(audio_file, 'rb') as f:
+                audio_bytes = f.read()
+
+        file_size_mb = len(audio_bytes) / (1024 * 1024)
+        print(f"[Chirp3] Audio size: {file_size_mb:.2f} MB")
+
+        if progress_callback:
+            progress_callback(f"Sending to Chirp 3 ({file_size_mb:.1f} MB)...")
+
+        # Build recognition config with diarization
+        recognition_config = cloud_speech.RecognitionConfig(
+            auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+            language_codes=["en-US"],
+            model="chirp_3",
+            features=cloud_speech.RecognitionFeatures(
+                enable_automatic_punctuation=True,
+                diarization_config=cloud_speech.SpeakerDiarizationConfig(
+                    enable_speaker_diarization=True,
+                    min_speaker_count=2,
+                    max_speaker_count=5,
+                ),
+            ),
+        )
+
+        recognizer_path = (
+            f"projects/{self.project_id}/locations/{self.region}/recognizers/_"
+        )
+
+        # Use synchronous Recognize for files up to ~60s,
+        # streaming chunked approach for longer audio
+        if len(audio_bytes) <= 10 * 1024 * 1024:  # <= 10 MB → sync
+            if progress_callback:
+                progress_callback("Transcribing with Chirp 3 (sync)...")
+
+            request = cloud_speech.RecognizeRequest(
+                recognizer=recognizer_path,
+                config=recognition_config,
+                content=audio_bytes,
+            )
+            response = self.speech_client.recognize(request=request)
+            transcript = self._build_transcript_from_recognize(response)
+
+        else:
+            # Streaming for larger files
+            if progress_callback:
+                progress_callback("Transcribing with Chirp 3 (streaming)...")
+            transcript = self._transcribe_streaming(
+                audio_bytes, recognition_config, recognizer_path, progress_callback
+            )
+
+        if progress_callback:
+            progress_callback("Transcription complete!")
+
+        print(f"[Chirp3] Transcript length: {len(transcript)} chars")
+        return transcript
+
+    def _build_transcript_from_recognize(self, response) -> str:
+        """Build a readable transcript from sync Recognize response with speaker labels."""
+        lines = []
+        for result in response.results:
+            alt = result.alternatives[0]
+            # Try to get speaker tag from words
+            if alt.words:
+                current_speaker = None
+                current_text = []
+                for word in alt.words:
+                    speaker = getattr(word, 'speaker_label', None) or \
+                              getattr(word, 'speaker_tag', None)
+                    if speaker != current_speaker:
+                        if current_text:
+                            label = f"Speaker {current_speaker}" if current_speaker else "Speaker"
+                            lines.append(f"{label}: {' '.join(current_text)}")
+                        current_speaker = speaker
+                        current_text = [word.word]
+                    else:
+                        current_text.append(word.word)
+                if current_text:
+                    label = f"Speaker {current_speaker}" if current_speaker else "Speaker"
+                    lines.append(f"{label}: {' '.join(current_text)}")
+            else:
+                lines.append(alt.transcript)
+        return "\n".join(lines)
+
+    def _transcribe_streaming(self, audio_bytes: bytes, recognition_config,
+                               recognizer_path: str, progress_callback=None) -> str:
+        """Stream large audio in chunks to Chirp 3."""
+        from google.cloud.speech_v2.types import cloud_speech
+
+        CHUNK_SIZE = 32768  # 32 KB chunks
+
+        streaming_config = cloud_speech.StreamingRecognitionConfig(
+            config=recognition_config,
+        )
+
+        config_request = cloud_speech.StreamingRecognizeRequest(
+            recognizer=recognizer_path,
+            streaming_config=streaming_config,
+        )
+
+        def audio_generator():
+            yield config_request
+            total = len(audio_bytes)
+            for i in range(0, total, CHUNK_SIZE):
+                chunk = audio_bytes[i:i + CHUNK_SIZE]
+                yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
+                if progress_callback:
+                    pct = min(100, int((i / total) * 100))
+                    progress_callback(f"Transcribing... {pct}%")
+
+        responses = self.speech_client.streaming_recognize(requests=audio_generator())
+
+        lines = []
+        for response in responses:
+            for result in response.results:
+                if result.is_final:
+                    alt = result.alternatives[0]
+                    lines.append(alt.transcript)
+
+        return "\n".join(lines)
+
+    def extract_data(self, transcript: str) -> dict:
+        """
+        Extract structured data from transcript using Gemini 2.5 Flash
+        with overflow capture and validation metrics.
+        """
+        prompt = ENHANCED_PROMPT_TEMPLATE.format(transcript=transcript)
+
+        try:
+            response = self.gemini_model.generate_content(
+                prompt,
+                generation_config={
+                    'temperature': 0.3,   # Lower temp for more consistent extraction
+                    'top_p': 0.95,
+                    'max_output_tokens': 4096,
+                }
+            )
+
             response_text = response.text.strip()
-            
-            # Remove markdown code blocks if present
+
+            # Strip markdown code fences if present
             if response_text.startswith('```'):
-                # Find the first newline after ```
                 start = response_text.find('\n')
-                # Find the closing ```
                 end = response_text.rfind('```')
                 if start != -1 and end != -1:
-                    response_text = response_text[start+1:end].strip()
-            
-            # Parse JSON
+                    response_text = response_text[start + 1:end].strip()
+
             data = json.loads(response_text)
             return data
-            
+
         except json.JSONDecodeError as e:
-            print(f"Error parsing JSON from Gemini response: {e}")
-            print(f"Response text: {response_text}")
+            print(f"[Chirp3Gemini] JSON parse error: {e}")
+            print(f"Response: {response_text[:500]}")
             raise
         except Exception as e:
-            print(f"Error calling Gemini API: {e}")
+            print(f"[Chirp3Gemini] Gemini API error: {e}")
             raise
+

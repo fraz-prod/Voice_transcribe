@@ -16,16 +16,16 @@ class FormFiller:
         # Helper to mark Yes/No checkboxes
         def mark_yes_no(paragraph, answer_yes: bool):
             """
-            Replaces ' Yes ' and ' No' patterns with [X] markers.
+            Replaces ' Yes ' and ' No' patterns with [✓] markers.
             answer_yes=True marks Yes, answer_yes=False marks No.
             """
             text = paragraph.text
             if answer_yes:
-                text = text.replace("  Yes  ", "  [X] Yes  ").replace("  No", "  [ ] No")
-                text = text.replace(" Yes  No", " [X] Yes  [ ] No")
+                text = text.replace("  Yes  ", "  [✓] Yes  ").replace("  No", "  [  ] No")
+                text = text.replace(" Yes  No", " [✓] Yes  [  ] No")
             else:
-                text = text.replace("  Yes  ", "  [ ] Yes  ").replace("  No", "  [X] No")
-                text = text.replace(" Yes  No", " [ ] Yes  [X] No")
+                text = text.replace("  Yes  ", "  [  ] Yes  ").replace("  No", "  [✓] No")
+                text = text.replace(" Yes  No", " [  ] Yes  [✓] No")
             paragraph.text = text
 
         # Helper to fill underscores
@@ -181,7 +181,7 @@ class FormFiller:
             if "Results:" in para.text and "Normal" in para.text:
                 result = ecg.get("result", "Normal")
                 if result == "Normal":
-                    para.text = para.text.replace(" Normal ", " [X] Normal ")
+                    para.text = para.text.replace(" Normal ", " [✓] Normal ")
                 break
 
         # === SECTION 12: Labs ===
@@ -236,9 +236,9 @@ class FormFiller:
                 if "Results:" in para.text and ("Positive" in para.text or "Negative" in para.text):
                     result = pregnancy.get("result", "Negative")
                     if result == "Negative":
-                        para.text = para.text.replace(" Negative", " [X] Negative").replace(" Positive", " [ ] Positive")
+                        para.text = para.text.replace(" Negative", " [✓] Negative").replace(" Positive", " [  ] Positive")
                     else:
-                        para.text = para.text.replace(" Positive", " [X] Positive").replace(" Negative", " [ ] Negative")
+                        para.text = para.text.replace(" Positive", " [✓] Positive").replace(" Negative", " [  ] Negative")
                     break
 
         # === SECTION 14: Investigational Product ===
@@ -260,13 +260,13 @@ class FormFiller:
                 if "Laterality:" in para.text:
                     lat = inj.get("laterality", "").lower()
                     if "left lower" in lat:
-                        para.text = para.text.replace("Left Lower Quadrant", "[X] Left Lower Quadrant")
+                        para.text = para.text.replace("Left Lower Quadrant", "[✓] Left Lower Quadrant")
                     elif "left upper" in lat:
-                        para.text = para.text.replace("Left Upper Quadrant", "[X] Left Upper Quadrant")
+                        para.text = para.text.replace("Left Upper Quadrant", "[✓] Left Upper Quadrant")
                     elif "right lower" in lat:
-                        para.text = para.text.replace("Right Lower Quadrant", "[X] Right Lower Quadrant")
+                        para.text = para.text.replace("Right Lower Quadrant", "[✓] Right Lower Quadrant")
                     elif "right upper" in lat:
-                        para.text = para.text.replace("Right Upper Quadrant", "[X] Right Upper Quadrant")
+                        para.text = para.text.replace("Right Upper Quadrant", "[✓] Right Upper Quadrant")
                     break
             
             for para in doc.paragraphs:
@@ -301,13 +301,13 @@ class FormFiller:
                     elif "Laterality:" in para.text:
                         lat = inj2.get("laterality", "").lower()
                         if "left lower" in lat:
-                            para.text = para.text.replace("Left Lower Quadrant", "[X] Left Lower Quadrant")
+                            para.text = para.text.replace("Left Lower Quadrant", "[✓] Left Lower Quadrant")
                         elif "right lower" in lat:
-                            para.text = para.text.replace("Right Lower Quadrant", "[X] Right Lower Quadrant")
+                            para.text = para.text.replace("Right Lower Quadrant", "[✓] Right Lower Quadrant")
                         elif "left upper" in lat:
-                            para.text = para.text.replace("Left Upper Quadrant", "[X] Left Upper Quadrant")
+                            para.text = para.text.replace("Left Upper Quadrant", "[✓] Left Upper Quadrant")
                         elif "right upper" in lat:
-                            para.text = para.text.replace("Right Upper Quadrant", "[X] Right Upper Quadrant")
+                            para.text = para.text.replace("Right Upper Quadrant", "[✓] Right Upper Quadrant")
                     elif "Start Date:" in para.text:
                         fill_underscores(para, inj2.get("start_date", ""))
                     elif "Start Time:" in para.text:

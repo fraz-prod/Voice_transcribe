@@ -1,5 +1,5 @@
 Nurse: Hello. This is your Astra STAR-0215-301 Day 1 visit. I will complete all required source documentation with you. Please confirm your Subject Initials, Subject ID, and today’s date.
-Patient:Hi, I was driving my lexus last night, i had a great dinner . i also watched Star Wars last night Initials A.K., Subject ID 0215-301, Date 26 January 2026.
+Patient:Hi,I am Fraz 24 years old and I was driving my lexus last night, i had a great dinner . i also watched Star Wars last night Initials A.K., Subject ID 0215-301, Date 26 January 2026.
 Nurse: Visit Date is 26 January 2026. Was the visit performed today?
 Patient: Yes, the visit was performed today.
 Nurse: Thank you. We will begin with Patient Reported Outcomes. Did you complete EQ-5D-5L?
@@ -38,6 +38,12 @@ Patient: Last Cinryze dose was January 20, 2026, and last Berinert was January 1
 Nurse: Thank you. The system will calculate the required washout periods for each medication.
 Nurse: Inclusion/Exclusion Criteria. Were all eligibility criteria met, including at least two investigator-confirmed HAE attacks during run-in period?
 Patient: Yes.
+Nurse: Can you confirm your HAE type?
+Patient: I have HAE Type 1, confirmed by my immunologist.
+Nurse: Thank you. Regarding Inclusion Criterion 5 — do you agree to refrain from receiving any live or live-attenuated vaccines during the study period?
+Patient: Yes, I understand and agree to avoid live vaccines for the duration of the study.
+Nurse: Regarding Inclusion Criteria 7 and 8 — if applicable, do you agree to use highly effective contraception throughout the study and for the required period after the last dose? And do you agree to refrain from sperm or egg donation during the study and for the specified period after?
+Patient: Yes, I agree to both the contraception requirements and the restriction on sperm and egg donation as outlined in the protocol.
 Nurse: Did you continue to meet eligibility at Day 1 visit?
 Patient: Yes.
 Nurse: Randomization. Was the subject randomized in IRT?
