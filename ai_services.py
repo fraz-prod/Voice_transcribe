@@ -1427,72 +1427,314 @@ class LiveSessionService:
         except ImportError:
             raise ImportError("google-generativeai not installed. Run: pip install google-generativeai")
 
-    # -- Script Generator -----------------------------------------------------
+    # -- Script Generator (structured JSON) ----------------------------------
 
-    def generate_prescreening_script(self, protocol_text: str) -> str:
+    def generate_script_structured(self, protocol_text: str) -> list:
         """
-        Generate a ready-to-read pre-screening call script for Ninna based on
-        the study protocol's inclusion/exclusion criteria.
+        Generate the pre-screening call script as STRUCTURED JSON — a list of
+        question cards Ninna reads during the call.
 
-        Returns a plain-text script (markdown formatted) that Ninna can follow
-        during the call. Each criterion becomes a specific question to ask.
+        Each card contains:
+          id, section, criterion, ninna_says, pass_condition, fail_condition,
+          answer (null initially), status (open), source (auto/manual/none)
+
+        Returns a list of card dicts, or [] on error.
         """
         MAX_PROTO = 25000
         if len(protocol_text) > MAX_PROTO:
             protocol_text = protocol_text[:MAX_PROTO] + "\n\n[Protocol truncated]"
 
-        prompt = f"""You are a clinical research coordinator creating a pre-screening phone call script for a study coordinator named Ninna.
+        prompt = f"""You are a clinical research coordinator.
 
-Based on the following study protocol, create a complete, professional call script that Ninna will READ ALOUD to a potential patient during a pre-screening phone call.
+Based on the following study protocol, generate a PRE-SCREENING PHONE CALL SCRIPT as structured JSON.
 
 PROTOCOL:
 {protocol_text}
 
-Create a script with these exact sections:
+Return a JSON object with this exact structure:
 
-## 📞 Opening
-A professional introduction. Ninna confirms who she is, the study name, and the purpose of the call.
+{{
+  "opening": "Exact words Ninna says to open the call",
+  "closing_eligible": "Exact words Ninna says if patient IS eligible",
+  "closing_ineligible": "Exact words Ninna says if patient is NOT eligible",
+  "questions": [
+    {{
+      "id": "inc_1",
+      "section": "inclusion",
+      "criterion": "Short name of the criterion",
+      "ninna_says": "Exact conversational question Ninna reads aloud to the patient",
+      "pass_condition": "What answer qualifies the patient (e.g. YES, Age >= 18)",
+      "fail_condition": "What answer disqualifies the patient",
+      "washout_days": null,
+      "answer": null,
+      "status": "open",
+      "source": "none"
+    }}
+  ]
+}}
 
-## ✅ Inclusion Criteria Questions
-One question per inclusion criterion. Each question should:
-- Be worded conversationally (what Ninna says out loud)
-- Include a [RECORD ANSWER] prompt after each question
-- Note what answer is needed to PASS (e.g., "[PASS if YES]")
-Format each as:
-**[Number]. [Criterion name]**
-Ninna says: "..."
-[PASS if: ...]
-[RECORD ANSWER: ____________________]
+Rules:
+- section must be one of: "inclusion", "exclusion", "washout", "general"
+- For exclusion: pass_condition = "NO / Not present", fail_condition = "YES / Present"
+- For washout questions: set washout_days to the integer number of days from protocol
+- ninna_says must be plain English — NO medical jargon — a patient must understand it
+- id format: inc_1, inc_2 for inclusion; exc_1, exc_2 for exclusion; wash_1 for washout
+- Cover EVERY inclusion criterion, EVERY exclusion criterion, and ALL prohibited medications with washout periods
+- answer, status, source start as: null, "open", "none"
+- Return ONLY valid JSON — no markdown fences, no explanation
+"""
+        import re as _re
 
-## ❌ Exclusion Criteria Questions
-One question per exclusion criterion. Same format.
-Note what answer DISQUALIFIES the patient (e.g., "[FAIL if YES]")
+        def _repair(text: str) -> str:
+            text = _re.sub(r',\s*([\]}])', r'\1', text)          # trailing commas
+            open_b = text.count('{') - text.count('}')
+            open_k = text.count('[') - text.count(']')
+            # close unclosed string
+            in_s = esc = False
+            for ch in text:
+                if esc:   esc = False; continue
+                if ch == '\\': esc = True; continue
+                if ch == '"':  in_s = not in_s
+            if in_s:
+                text = text.rstrip() + '"'
+            text = text.rstrip().rstrip(',')
+            text += ']' * open_k + '}' * open_b
+            return text
 
-## 💊 Medication & Washout Questions
-Questions about current medications and recent use of prohibited drugs.
-Include specific washout periods from the protocol where applicable.
+        try:
+            response = self.model.generate_content(
+                prompt,
+                generation_config={
+                    'temperature': 0.3,
+                    'top_p': 0.95,
+                    'max_output_tokens': 8192,
+                    'response_mime_type': 'application/json',
+                }
+            )
+            raw = (response.text or "").strip()
+            # Extract outer { ... }
+            start, end = raw.find('{'), raw.rfind('}')
+            if start != -1 and end != -1:
+                raw = raw[start:end+1]
+            # Try direct parse first, then repair
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return json.loads(_repair(raw))
+        except Exception as e:
+            print(f"[LiveSessionService] Script generation error: {e}")
+            return {}
 
-## 📋 Closing
-How to wrap up the call. Explain next steps if eligible, how to decline politely if not.
 
-IMPORTANT:
-- Write EXACTLY what Ninna says in plain English — no jargon
-- Keep questions SHORT and clear — patients are not medical professionals
-- Use the EXACT criteria from the protocol above
-- Return only the script text in markdown format, no preamble
+    # -- Answer Extractor -----------------------------------------------------
+
+    def extract_script_answers(self, questions: list, transcript: str, manual_notes: str = "") -> list:
+        """
+        Given the current list of script question cards and the accumulated
+        transcript (plus any manual notes Ninna typed), ask Gemini to fill in
+        the 'answer' and 'status' fields for every question.
+
+        Returns an updated copy of the questions list.
+        """
+        if not questions or not transcript.strip():
+            return questions
+
+        # Build a compact representation of questions for the prompt
+        q_summary = []
+        for q in questions:
+            q_summary.append({
+                "id":       q.get("id"),
+                "section":  q.get("section"),
+                "criterion": q.get("criterion"),
+                "pass_condition": q.get("pass_condition"),
+                "fail_condition": q.get("fail_condition"),
+                "washout_days": q.get("washout_days"),
+            })
+
+        context = transcript
+        if manual_notes.strip():
+            context += f"\n\n[MANUAL NOTES FROM NINNA]: {manual_notes}"
+
+        prompt = f"""You are reviewing a live pre-screening phone call transcript.
+
+For each question below, find the patient's answer in the transcript (or manual notes) and classify the outcome.
+
+TRANSCRIPT / NOTES:
+{context}
+
+QUESTIONS (as JSON):
+{json.dumps(q_summary, indent=2)}
+
+For EACH question, return updated fields. Return a JSON array where each element is:
+{{
+  "id": "same id as input",
+  "answer": "Exact quote or summary of what patient said, or null if not discussed",
+  "status": "open | confirmed_met | confirmed_failed | needs_clarification",
+  "source": "auto | manual | none"
+}}
+
+Rules:
+- "source": "auto" if answer came from the transcript, "manual" if from [MANUAL NOTES], "none" if not found
+- For inclusion: status="confirmed_met" means patient PASSED this criterion
+- For exclusion: status="confirmed_met" means exclusion IS triggered (BAD for patient)
+- If not discussed at all: answer=null, status="open", source="none"
+- Return ONLY valid JSON array — no explanation
 """
         try:
             response = self.model.generate_content(
                 prompt,
                 generation_config={
-                    'temperature': 0.4,
-                    'top_p': 0.95,
+                    'temperature': 0.1,
                     'max_output_tokens': 8192,
+                    'response_mime_type': 'application/json',
                 }
             )
-            return (response.text or "").strip()
+            raw = (response.text or "").strip()
+            # Extract the JSON array (handles markdown fences etc.)
+            start, end = raw.find('['), raw.rfind(']')
+            if start != -1 and end != -1:
+                raw = raw[start:end+1]
+
+            def _repair_json(s: str) -> str:
+                """Best-effort repair for truncated/malformed JSON from Gemini."""
+                import re as _re
+                # Remove trailing commas before ] or }
+                s = _re.sub(r',\s*([\]}])', r'\1', s)
+                # Close any open string by finding the last unclosed "
+                if s.count('"') % 2 != 0:
+                    s = s.rstrip() + '"'
+                # Close open objects/arrays
+                opens   = s.count('{') - s.count('}')
+                s += '}' * max(opens, 0)
+                opens_a = s.count('[') - s.count(']')
+                s += ']' * max(opens_a, 0)
+                return s
+
+            try:
+                updates = json.loads(raw)
+            except json.JSONDecodeError:
+                try:
+                    updates = json.loads(_repair_json(raw))
+                except json.JSONDecodeError as e2:
+                    print(f"[LiveSessionService] JSON repair failed: {e2}")
+                    return questions   # Return unchanged on total failure
+
+            # Merge updates back into questions list — always apply when Gemini
+            # returns a definitive answer; preserve existing auto-fills otherwise.
+            update_map = {u["id"]: u for u in updates}
+            updated = []
+            for q in questions:
+                q = dict(q)
+                upd = update_map.get(q.get("id"), {})
+                # Apply if Gemini found something new, or if field is still empty
+                if upd.get("answer") is not None:
+                    q["answer"] = upd["answer"]
+                if upd.get("status") and upd["status"] != "open":
+                    q["status"] = upd["status"]
+                elif upd.get("status") == "open" and q.get("status") == "open":
+                    q["status"] = "open"  # keep open
+                if upd.get("source") and upd["source"] != "none":
+                    q["source"] = upd["source"]
+                updated.append(q)
+            return updated
         except Exception as e:
-            return f"⚠️ Could not generate script: {e}\n\nMake sure your Gemini API key is valid and the protocol is uploaded."
+            print(f"[LiveSessionService] Answer extraction error: {e}")
+            return questions  # Return unchanged on error
+
+    # -- I/E → Script Sync ---------------------------------------------------
+
+    @staticmethod
+    def sync_ie_to_script(questions: list, ie_status: dict) -> list:
+        """
+        Map the results of run_ie_check() back into the script question cards.
+
+        This is the primary way script cards get filled — the I/E check is
+        already accurate; we just need to copy its criterion-level results
+        (status + evidence) into the matching script card.
+
+        Matching is done by fuzzy keyword lookup on criterion name.
+        Returns an updated copy of questions.
+        """
+        if not questions or not ie_status:
+            return questions
+
+        import re as _re
+
+        def _tokens(text: str) -> set:
+            """Lower-case word tokens for fuzzy matching."""
+            return set(_re.findall(r'[a-z0-9]+', (text or "").lower()))
+
+        # Build lookup lists from I/E check output
+        ie_items = (
+            [("inclusion", i) for i in ie_status.get("inclusion_criteria", [])]
+            + [("exclusion", i) for i in ie_status.get("exclusion_criteria", [])]
+        )
+        washout_items = ie_status.get("washout_flags", [])
+
+        def _best_match(q_criterion: str, section: str):
+            """Return the best-matching ie_item for this criterion."""
+            q_tok = _tokens(q_criterion)
+            best, best_score = None, 0
+            for ie_sec, item in ie_items:
+                if section == "washout" or (
+                    ie_sec == "inclusion" and section == "inclusion"
+                ) or (
+                    ie_sec == "exclusion" and section == "exclusion"
+                ) or section == "general":
+                    i_tok = _tokens(item.get("criterion", ""))
+                    if not i_tok:
+                        continue
+                    common = len(q_tok & i_tok)
+                    score  = common / max(len(q_tok | i_tok), 1)
+                    if score > best_score and common >= 1:
+                        best, best_score = item, score
+            return best
+
+        # Status mapping — same convention as I/E check
+        STATUS_MAP = {
+            "confirmed_met":       "confirmed_met",
+            "confirmed_failed":    "confirmed_failed",
+            "needs_clarification": "needs_clarification",
+            "open":                "open",
+        }
+
+        updated = []
+        for q in questions:
+            q = dict(q)
+            section   = q.get("section", "general")
+            criterion = q.get("criterion", "")
+
+            if section == "washout":
+                # Match against washout flags by medication name
+                q_tok = _tokens(criterion)
+                for w in washout_items:
+                    w_tok = _tokens(w.get("medication", ""))
+                    if q_tok & w_tok:
+                        wstatus = w.get("status", "unclear")
+                        q["status"] = (
+                            "confirmed_failed" if wstatus == "compliant"
+                            else "confirmed_met" if wstatus == "non_compliant"
+                            else "needs_clarification"
+                        )
+                        q["answer"] = w.get("note") or f"Last dose: {w.get('last_dose_date','unknown')}"
+                        q["source"] = "auto"
+                        break
+            else:
+                match = _best_match(criterion, section)
+                if match:
+                    ie_status_val = match.get("status", "open")
+                    mapped = STATUS_MAP.get(ie_status_val, "open")
+                    # Only upgrade (open → something definitive), never downgrade
+                    current = q.get("status", "open")
+                    if current == "open" or mapped != "open":
+                        q["status"] = mapped
+                    evidence = match.get("evidence")
+                    if evidence and not q.get("answer"):
+                        q["answer"] = evidence
+                        q["source"] = "auto"
+
+            updated.append(q)
+        return updated
 
     # -- Transcription --------------------------------------------------------
 
