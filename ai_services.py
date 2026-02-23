@@ -948,6 +948,76 @@ class GeminiAIService:
         reader = PdfReader(_io.BytesIO(pdf_file.read()))
         pages = [page.extract_text() or "" for page in reader.pages]
         return "\n\n".join(pages).strip()
+
+    @staticmethod
+    def parse_protocol_md(md_file) -> str:
+        """
+        Extract clinically relevant sections from an OCR-generated protocol Markdown file.
+
+        Instead of sending the full document (which can be 200KB+), this function
+        uses regex-based section detection to extract only the parts Gemini needs:
+          - Inclusion / Exclusion criteria
+          - Washout periods
+          - Prohibited medications
+          - Schedule of Assessments (visit-specific requirements)
+          - Synopsis (for visit type context)
+
+        No LLM is used — this is pure text processing. The result is a focused
+        ~30-60K char excerpt that fits comfortably in the context window.
+        """
+        import re
+
+        md_file.seek(0)
+        full_text = md_file.read().decode("utf-8", errors="replace")
+
+        # Section headings to look for (case-insensitive, partial match)
+        RELEVANT_SECTIONS = [
+            r"synopsis",
+            r"inclusion.{0,20}criteria",
+            r"exclusion.{0,20}criteria",
+            r"washout",
+            r"prohibited.{0,20}med",
+            r"schedule.{0,20}assessment",
+            r"visit.{0,20}procedure",
+            r"eligibility",
+            r"contraception",
+            r"run.?in.{0,20}period",
+        ]
+
+        # Split the document into sections by markdown headings (# ## ###)
+        # Pattern: a line starting with one or more # characters
+        heading_pattern = re.compile(r'^(#{1,4})\s+(.+)$', re.MULTILINE)
+        matches = list(heading_pattern.finditer(full_text))
+
+        extracted_sections = []
+
+        for i, match in enumerate(matches):
+            heading_text = match.group(2).strip()
+            # Check if this heading is relevant
+            is_relevant = any(
+                re.search(pattern, heading_text, re.IGNORECASE)
+                for pattern in RELEVANT_SECTIONS
+            )
+            if is_relevant:
+                # Extract from this heading to the next same-or-higher-level heading
+                start = match.start()
+                end = matches[i + 1].start() if i + 1 < len(matches) else len(full_text)
+                section_text = full_text[start:end].strip()
+                # Cap each section at 15,000 chars to prevent any single section dominating
+                extracted_sections.append(section_text[:15000])
+
+        if extracted_sections:
+            combined = "\n\n---\n\n".join(extracted_sections)
+        else:
+            # Fallback: if no headings matched, take the first 60K chars
+            combined = full_text[:60000]
+
+        # Final cap: 80,000 chars (much higher than PDF cap since MD is already clean text)
+        MAX_MD_CHARS = 80000
+        if len(combined) > MAX_MD_CHARS:
+            combined = combined[:MAX_MD_CHARS] + "\n\n[Protocol text truncated at 80,000 characters]"
+
+        return combined
     
     def extract_data(self, transcript: str, protocol_text: str = "") -> dict:
         """Extract structured data from transcript using Gemini Flash with overflow capture.
@@ -1332,4 +1402,520 @@ class Chirp3GeminiService:
         except Exception as e:
             print(f"[Chirp3Gemini] Gemini API error: {e}")
             raise
+
+
+class LiveSessionService:
+    """
+    Service for real-time I/E categorization during a live pre-screen phone call.
+
+    Workflow:
+      1. Ninna records a ~15-30s audio chunk via st.audio_input()
+      2. Call transcribe_chunk() -> Whisper transcribes it locally
+      3. Accumulate the returned text into session state
+      4. Every 3 chunks, call run_ie_check() -> Gemini updates the I/E panel
+
+    Gemini is only called every ~90 seconds, keeping cost very low.
+    """
+
+    IE_CHECK_EVERY_N_CHUNKS = 3  # Run Gemini I/E check every N recorded chunks
+
+    def __init__(self, api_key: str):
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            self.model = genai.GenerativeModel('gemini-2.5-flash')
+        except ImportError:
+            raise ImportError("google-generativeai not installed. Run: pip install google-generativeai")
+
+    # -- Script Generator (structured JSON) ----------------------------------
+
+    def generate_script_structured(self, protocol_text: str) -> list:
+        """
+        Generate the pre-screening call script as STRUCTURED JSON — a list of
+        question cards Ninna reads during the call.
+
+        Each card contains:
+          id, section, criterion, ninna_says, pass_condition, fail_condition,
+          answer (null initially), status (open), source (auto/manual/none)
+
+        Returns a list of card dicts, or [] on error.
+        """
+        MAX_PROTO = 25000
+        if len(protocol_text) > MAX_PROTO:
+            protocol_text = protocol_text[:MAX_PROTO] + "\n\n[Protocol truncated]"
+
+        prompt = f"""You are a clinical research coordinator.
+
+Based on the following study protocol, generate a PRE-SCREENING PHONE CALL SCRIPT as structured JSON.
+
+PROTOCOL:
+{protocol_text}
+
+Return a JSON object with this exact structure:
+
+{{
+  "opening": "Exact words Ninna says to open the call",
+  "closing_eligible": "Exact words Ninna says if patient IS eligible",
+  "closing_ineligible": "Exact words Ninna says if patient is NOT eligible",
+  "questions": [
+    {{
+      "id": "inc_1",
+      "section": "inclusion",
+      "criterion": "Short name of the criterion",
+      "ninna_says": "Exact conversational question Ninna reads aloud to the patient",
+      "pass_condition": "What answer qualifies the patient (e.g. YES, Age >= 18)",
+      "fail_condition": "What answer disqualifies the patient",
+      "washout_days": null,
+      "answer": null,
+      "status": "open",
+      "source": "none"
+    }}
+  ]
+}}
+
+Rules:
+- section must be one of: "inclusion", "exclusion", "washout", "general"
+- For exclusion: pass_condition = "NO / Not present", fail_condition = "YES / Present"
+- For washout questions: set washout_days to the integer number of days from protocol
+- ninna_says must be plain English — NO medical jargon — a patient must understand it
+- id format: inc_1, inc_2 for inclusion; exc_1, exc_2 for exclusion; wash_1 for washout
+- Cover EVERY inclusion criterion, EVERY exclusion criterion, and ALL prohibited medications with washout periods
+- answer, status, source start as: null, "open", "none"
+- Return ONLY valid JSON — no markdown fences, no explanation
+"""
+        import re as _re
+
+        def _repair(text: str) -> str:
+            text = _re.sub(r',\s*([\]}])', r'\1', text)          # trailing commas
+            open_b = text.count('{') - text.count('}')
+            open_k = text.count('[') - text.count(']')
+            # close unclosed string
+            in_s = esc = False
+            for ch in text:
+                if esc:   esc = False; continue
+                if ch == '\\': esc = True; continue
+                if ch == '"':  in_s = not in_s
+            if in_s:
+                text = text.rstrip() + '"'
+            text = text.rstrip().rstrip(',')
+            text += ']' * open_k + '}' * open_b
+            return text
+
+        try:
+            response = self.model.generate_content(
+                prompt,
+                generation_config={
+                    'temperature': 0.3,
+                    'top_p': 0.95,
+                    'max_output_tokens': 8192,
+                    'response_mime_type': 'application/json',
+                }
+            )
+            raw = (response.text or "").strip()
+            # Extract outer { ... }
+            start, end = raw.find('{'), raw.rfind('}')
+            if start != -1 and end != -1:
+                raw = raw[start:end+1]
+            # Try direct parse first, then repair
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return json.loads(_repair(raw))
+        except Exception as e:
+            print(f"[LiveSessionService] Script generation error: {e}")
+            return {}
+
+
+    # -- Answer Extractor -----------------------------------------------------
+
+    def extract_script_answers(self, questions: list, transcript: str, manual_notes: str = "") -> list:
+        """
+        Given the current list of script question cards and the accumulated
+        transcript (plus any manual notes Ninna typed), ask Gemini to fill in
+        the 'answer' and 'status' fields for every question.
+
+        Returns an updated copy of the questions list.
+        """
+        if not questions or not transcript.strip():
+            return questions
+
+        # Build a compact representation of questions for the prompt
+        q_summary = []
+        for q in questions:
+            q_summary.append({
+                "id":       q.get("id"),
+                "section":  q.get("section"),
+                "criterion": q.get("criterion"),
+                "pass_condition": q.get("pass_condition"),
+                "fail_condition": q.get("fail_condition"),
+                "washout_days": q.get("washout_days"),
+            })
+
+        context = transcript
+        if manual_notes.strip():
+            context += f"\n\n[MANUAL NOTES FROM NINNA]: {manual_notes}"
+
+        prompt = f"""You are reviewing a live pre-screening phone call transcript.
+
+For each question below, find the patient's answer in the transcript (or manual notes) and classify the outcome.
+
+TRANSCRIPT / NOTES:
+{context}
+
+QUESTIONS (as JSON):
+{json.dumps(q_summary, indent=2)}
+
+For EACH question, return updated fields. Return a JSON array where each element is:
+{{
+  "id": "same id as input",
+  "answer": "Exact quote or summary of what patient said, or null if not discussed",
+  "status": "open | confirmed_met | confirmed_failed | needs_clarification",
+  "source": "auto | manual | none"
+}}
+
+Rules:
+- "source": "auto" if answer came from the transcript, "manual" if from [MANUAL NOTES], "none" if not found
+- For inclusion: status="confirmed_met" means patient PASSED this criterion
+- For exclusion: status="confirmed_met" means exclusion IS triggered (BAD for patient)
+- If not discussed at all: answer=null, status="open", source="none"
+- Return ONLY valid JSON array — no explanation
+"""
+        try:
+            response = self.model.generate_content(
+                prompt,
+                generation_config={
+                    'temperature': 0.1,
+                    'max_output_tokens': 8192,
+                    'response_mime_type': 'application/json',
+                }
+            )
+            raw = (response.text or "").strip()
+            # Extract the JSON array (handles markdown fences etc.)
+            start, end = raw.find('['), raw.rfind(']')
+            if start != -1 and end != -1:
+                raw = raw[start:end+1]
+
+            def _repair_json(s: str) -> str:
+                """Best-effort repair for truncated/malformed JSON from Gemini."""
+                import re as _re
+                # Remove trailing commas before ] or }
+                s = _re.sub(r',\s*([\]}])', r'\1', s)
+                # Close any open string by finding the last unclosed "
+                if s.count('"') % 2 != 0:
+                    s = s.rstrip() + '"'
+                # Close open objects/arrays
+                opens   = s.count('{') - s.count('}')
+                s += '}' * max(opens, 0)
+                opens_a = s.count('[') - s.count(']')
+                s += ']' * max(opens_a, 0)
+                return s
+
+            try:
+                updates = json.loads(raw)
+            except json.JSONDecodeError:
+                try:
+                    updates = json.loads(_repair_json(raw))
+                except json.JSONDecodeError as e2:
+                    print(f"[LiveSessionService] JSON repair failed: {e2}")
+                    return questions   # Return unchanged on total failure
+
+            # Merge updates back into questions list — always apply when Gemini
+            # returns a definitive answer; preserve existing auto-fills otherwise.
+            update_map = {u["id"]: u for u in updates}
+            updated = []
+            for q in questions:
+                q = dict(q)
+                upd = update_map.get(q.get("id"), {})
+                # Apply if Gemini found something new, or if field is still empty
+                if upd.get("answer") is not None:
+                    q["answer"] = upd["answer"]
+                if upd.get("status") and upd["status"] != "open":
+                    q["status"] = upd["status"]
+                elif upd.get("status") == "open" and q.get("status") == "open":
+                    q["status"] = "open"  # keep open
+                if upd.get("source") and upd["source"] != "none":
+                    q["source"] = upd["source"]
+                updated.append(q)
+            return updated
+        except Exception as e:
+            print(f"[LiveSessionService] Answer extraction error: {e}")
+            return questions  # Return unchanged on error
+
+    # -- I/E → Script Sync ---------------------------------------------------
+
+    @staticmethod
+    def sync_ie_to_script(questions: list, ie_status: dict) -> list:
+        """
+        Map the results of run_ie_check() back into the script question cards.
+
+        This is the primary way script cards get filled — the I/E check is
+        already accurate; we just need to copy its criterion-level results
+        (status + evidence) into the matching script card.
+
+        Matching is done by fuzzy keyword lookup on criterion name.
+        Returns an updated copy of questions.
+        """
+        if not questions or not ie_status:
+            return questions
+
+        import re as _re
+
+        def _tokens(text: str) -> set:
+            """Lower-case word tokens for fuzzy matching."""
+            return set(_re.findall(r'[a-z0-9]+', (text or "").lower()))
+
+        # Build lookup lists from I/E check output
+        ie_items = (
+            [("inclusion", i) for i in ie_status.get("inclusion_criteria", [])]
+            + [("exclusion", i) for i in ie_status.get("exclusion_criteria", [])]
+        )
+        washout_items = ie_status.get("washout_flags", [])
+
+        def _best_match(q_criterion: str, section: str):
+            """Return the best-matching ie_item for this criterion."""
+            q_tok = _tokens(q_criterion)
+            best, best_score = None, 0
+            for ie_sec, item in ie_items:
+                if section == "washout" or (
+                    ie_sec == "inclusion" and section == "inclusion"
+                ) or (
+                    ie_sec == "exclusion" and section == "exclusion"
+                ) or section == "general":
+                    i_tok = _tokens(item.get("criterion", ""))
+                    if not i_tok:
+                        continue
+                    common = len(q_tok & i_tok)
+                    score  = common / max(len(q_tok | i_tok), 1)
+                    if score > best_score and common >= 1:
+                        best, best_score = item, score
+            return best
+
+        # Status mapping — same convention as I/E check
+        STATUS_MAP = {
+            "confirmed_met":       "confirmed_met",
+            "confirmed_failed":    "confirmed_failed",
+            "needs_clarification": "needs_clarification",
+            "open":                "open",
+        }
+
+        updated = []
+        for q in questions:
+            q = dict(q)
+            section   = q.get("section", "general")
+            criterion = q.get("criterion", "")
+
+            if section == "washout":
+                # Match against washout flags by medication name
+                q_tok = _tokens(criterion)
+                for w in washout_items:
+                    w_tok = _tokens(w.get("medication", ""))
+                    if q_tok & w_tok:
+                        wstatus = w.get("status", "unclear")
+                        q["status"] = (
+                            "confirmed_failed" if wstatus == "compliant"
+                            else "confirmed_met" if wstatus == "non_compliant"
+                            else "needs_clarification"
+                        )
+                        q["answer"] = w.get("note") or f"Last dose: {w.get('last_dose_date','unknown')}"
+                        q["source"] = "auto"
+                        break
+            else:
+                match = _best_match(criterion, section)
+                if match:
+                    ie_status_val = match.get("status", "open")
+                    mapped = STATUS_MAP.get(ie_status_val, "open")
+                    # Only upgrade (open → something definitive), never downgrade
+                    current = q.get("status", "open")
+                    if current == "open" or mapped != "open":
+                        q["status"] = mapped
+                    evidence = match.get("evidence")
+                    if evidence and not q.get("answer"):
+                        q["answer"] = evidence
+                        q["source"] = "auto"
+
+            updated.append(q)
+        return updated
+
+    # -- Transcription --------------------------------------------------------
+
+    @staticmethod
+    def transcribe_chunk(audio_bytes: bytes, whisper_model=None) -> str:
+        """
+        Transcribe a single audio chunk (bytes) using Faster-Whisper.
+        Returns the transcribed text, or an error string.
+
+        Args:
+            audio_bytes:   Raw audio bytes from st.audio_input()
+            whisper_model: Cached WhisperModel instance (from st.cache_resource)
+        """
+        import tempfile
+        import os
+
+        try:
+            from faster_whisper import WhisperModel
+
+            if whisper_model is None:
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                compute_type = "float16" if device == "cuda" else "int8"
+                whisper_model = WhisperModel("medium", device=device, compute_type=compute_type)
+
+            # Write bytes to a temp file -- Whisper needs a file path
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+
+            try:
+                segments, _ = whisper_model.transcribe(tmp_path, beam_size=5)
+                text = " ".join(seg.text for seg in segments).strip()
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+            return text
+
+        except ImportError:
+            return "[Error: faster-whisper not installed]"
+        except Exception as e:
+            return f"[Transcription error: {e}]"
+
+    # -- I/E Evaluation -------------------------------------------------------
+
+    def run_ie_check(self, transcript_so_far: str, protocol_text: str) -> dict:
+        """
+        Call Gemini with the lightweight I/E prompt and return the structured status dict.
+
+        Uses the same robust JSON repair pipeline as GeminiAIService.extract_data to
+        handle Gemini occasionally returning trailing commas or unclosed brackets.
+        """
+        from live_ie_prompt import LIVE_IE_PROMPT_TEMPLATE
+        import re as _re
+
+        # Cap protocol text to keep the prompt manageable
+        MAX_PROTO = 25000
+        if len(protocol_text) > MAX_PROTO:
+            protocol_text = protocol_text[:MAX_PROTO] + "\n\n[Protocol truncated]"
+
+        prompt = LIVE_IE_PROMPT_TEMPLATE.format(
+            protocol_context=protocol_text if protocol_text else "No protocol provided.",
+            transcript_so_far=transcript_so_far or "(No transcript yet)"
+        )
+
+        # ── JSON helpers (same pattern as GeminiAIService.extract_data) ────────
+
+        def _extract_json(raw: str) -> str:
+            """Pull JSON object out of any markdown-wrapped response."""
+            raw = raw.strip()
+            if not raw:
+                return ""
+            # Try to find ```json ... ``` block
+            fence = _re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, _re.DOTALL)
+            if fence:
+                return fence.group(1).strip()
+            if raw.startswith('```'):
+                lines = raw.split('\n')
+                inner = '\n'.join(lines[1:])
+                last = inner.rfind('```')
+                if last != -1:
+                    inner = inner[:last]
+                return inner.strip()
+            # Fall back: find outermost { ... }
+            start, end = raw.find('{'), raw.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                return raw[start:end+1].strip()
+            return raw
+
+        def _repair_json(text: str) -> str:
+            """Close unclosed brackets, remove trailing commas."""
+            # Remove trailing commas before } or ]
+            text = _re.sub(r',\s*([\]}])', r'\1', text)
+
+            # Count unclosed braces and brackets
+            open_braces   = text.count('{') - text.count('}')
+            open_brackets = text.count('[') - text.count(']')
+
+            # Close any unclosed string
+            in_string   = False
+            escape_next = False
+            for ch in text:
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == '\\':
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+            if in_string:
+                text = text.rstrip() + '"'
+
+            # Close brackets/braces
+            text = text.rstrip().rstrip(',')
+            for _ in range(open_brackets):
+                text += ']'
+            for _ in range(open_braces):
+                text += '}'
+            return text
+
+        def _safe_parse(raw: str) -> dict:
+            """Extract → try parse → try repair → raise."""
+            json_str = _extract_json(raw)
+            if not json_str:
+                raise ValueError(f"No JSON in Gemini response. Raw snippet: {raw[:300]}")
+            # First try: direct parse
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
+            # Second try: repaired
+            repaired = _repair_json(json_str)
+            return json.loads(repaired)   # Let this raise if still broken
+
+        # ── Gemini call ──────────────────────────────────────────────────────────
+
+        _SAFE_DEFAULT = {
+            "inclusion_criteria": [],
+            "exclusion_criteria": [],
+            "washout_flags": [],
+            "summary": {
+                "overall_status": "too_early_to_tell",
+                "open_count": 0,
+                "failed_count": 0,
+                "key_concerns": []
+            }
+        }
+
+        try:
+            response = self.model.generate_content(
+                prompt,
+                generation_config={
+                    'temperature': 0.2,
+                    'top_p': 0.9,
+                    'max_output_tokens': 4096,
+                    'response_mime_type': 'application/json',
+                }
+            )
+            raw = (response.text or "").strip()
+            if not raw:
+                # Retry once with lower temperature
+                print("[LiveSessionService] Empty response, retrying...")
+                response = self.model.generate_content(
+                    prompt,
+                    generation_config={'temperature': 0.1, 'max_output_tokens': 4096,
+                                       'response_mime_type': 'application/json'}
+                )
+                raw = (response.text or "").strip()
+            if not raw:
+                raise ValueError("Gemini returned empty response after retry")
+
+            return _safe_parse(raw)
+
+        except Exception as e:
+            print(f"[LiveSessionService] I/E check error: {e}")
+            default = dict(_SAFE_DEFAULT)
+            default["summary"] = dict(_SAFE_DEFAULT["summary"])
+            default["summary"]["key_concerns"] = [f"I/E check failed: {e}"]
+            return default
 

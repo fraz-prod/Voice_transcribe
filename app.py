@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from logic import WashoutCalculator, RuleEngine
-from ai_services import MockAIService, RealAIService, LocalAIService, LocalWhisperService, GeminiAIService, Chirp3GeminiService
+from ai_services import MockAIService, RealAIService, LocalAIService, LocalWhisperService, GeminiAIService, Chirp3GeminiService, LiveSessionService
+import live_session
 from form_filler import FormFiller
 import os
 
@@ -40,7 +41,7 @@ if check_model_initialized():
 
 # Sidebar for controls
 st.sidebar.header("Controls")
-mode = st.sidebar.selectbox("Mode", ["Mock Mode", "Local Mode (No LLM)", "Local Whisper Mode (No API Key)", "Gemini Mode (Gemini API)", "Chirp 3 Mode (Google Cloud)", "Live Mode (Requires API Key)"])
+mode = st.sidebar.selectbox("Mode", ["Mock Mode", "Local Mode (No LLM)", "Local Whisper Mode (No API Key)", "Gemini Mode (Gemini API)", "Chirp 3 Mode (Google Cloud)", "🎙️ Live Pre-Screen Call"])
 
 # Pre-load Whisper model if in Whisper mode
 if mode == "Local Whisper Mode (No API Key)":
@@ -65,10 +66,22 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-if mode == "Live Mode (Requires API Key)":
-    api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-    if not api_key:
-        st.warning("Please enter your API Key to use Live Mode.")
+if mode == "🎙️ Live Pre-Screen Call":
+    default_key = os.getenv("GEMINI_API_KEY", "")
+    gemini_api_key = st.sidebar.text_input("Gemini API Key", value=default_key, type="password", key="live_gemini_key")
+    st.sidebar.divider()
+    st.sidebar.subheader("📄 Protocol Document")
+    uploaded_protocol = st.sidebar.file_uploader(
+        "Upload Protocol (.md or PDF)",
+        type=["pdf", "md"],
+        key="live_protocol_upload",
+        help="Upload the study protocol — used for real-time I/E criterion checking during the call."
+    )
+    if uploaded_protocol:
+        file_ext = uploaded_protocol.name.split('.')[-1].lower()
+        st.sidebar.success(f"📋 Protocol loaded: {uploaded_protocol.name}")
+    if not gemini_api_key:
+        st.sidebar.warning("⚠️ Enter Gemini API Key to enable I/E checking.")
 
 if mode == "Gemini Mode (Gemini API)":
     default_key = os.getenv("GEMINI_API_KEY", "")
@@ -78,13 +91,17 @@ if mode == "Gemini Mode (Gemini API)":
     st.sidebar.divider()
     st.sidebar.subheader("📄 Protocol Document (Optional)")
     uploaded_protocol = st.sidebar.file_uploader(
-        "Upload Protocol PDF for smarter extraction",
-        type=["pdf"],
+        "Upload Protocol (PDF or Markdown)",
+        type=["pdf", "md"],
         key="sidebar_protocol_pdf",
-        help="The protocol text will be sent to Gemini alongside the transcript for more accurate, protocol-aware extraction."
+        help="Upload the protocol PDF or an OCR-generated .md file. The relevant sections will be sent to Gemini for protocol-aware extraction."
     )
     if uploaded_protocol:
-        st.sidebar.success(f"✅ Protocol loaded: {uploaded_protocol.name}")
+        file_ext = uploaded_protocol.name.split('.')[-1].lower()
+        icon = "📋" if file_ext == "md" else "📄"
+        st.sidebar.success(f"{icon} Protocol loaded: {uploaded_protocol.name}")
+        if file_ext == "md":
+            st.sidebar.info("ℹ️ MD file: smart section extraction will be used (no context window limit concerns)")
 
 if mode == "Chirp 3 Mode (Google Cloud)":
     st.sidebar.subheader("Google Cloud Settings")
@@ -102,6 +119,26 @@ if mode == "Chirp 3 Mode (Google Cloud)":
         st.warning("Please enter your Gemini API Key.")
     if not gcp_project_id:
         st.warning("Please enter your GCP Project ID.")
+
+# ── Live Pre-Screen Call — full-page mode, skip normal two-column layout ────
+if mode == "🎙️ Live Pre-Screen Call":
+    # Parse protocol if one was uploaded
+    live_protocol_text = ""
+    if 'uploaded_protocol' in dir() and uploaded_protocol is not None:
+        try:
+            file_ext = uploaded_protocol.name.split('.')[-1].lower()
+            if file_ext == "md":
+                live_protocol_text = GeminiAIService.parse_protocol_md(uploaded_protocol)
+            else:
+                live_protocol_text = GeminiAIService.parse_protocol_pdf(uploaded_protocol)
+        except Exception as e:
+            st.error(f"Error reading protocol: {e}")
+    live_session.render(
+        api_key=gemini_api_key or "",
+        protocol_text=live_protocol_text,
+        whisper_model=get_faster_whisper_model()
+    )
+    st.stop()   # Don't render the file-upload UI below
 
 col1, col2 = st.columns(2)
 
@@ -203,12 +240,18 @@ with col1:
                         )
                         transcript_placeholder.empty()  # Clear live view once done
                     
-                    # Parse protocol PDF if uploaded
+                    # Parse protocol document if uploaded (PDF or MD)
                     protocol_text = ""
                     if uploaded_protocol:
-                        with st.spinner("📄 Reading protocol document..."):
-                            protocol_text = GeminiAIService.parse_protocol_pdf(uploaded_protocol)
-                        st.info(f"📄 Protocol loaded — {len(protocol_text):,} characters extracted. Gemini will cross-reference this.")
+                        file_ext = uploaded_protocol.name.split('.')[-1].lower()
+                        if file_ext == "md":
+                            with st.spinner("📋 Extracting relevant sections from protocol Markdown..."):
+                                protocol_text = GeminiAIService.parse_protocol_md(uploaded_protocol)
+                            st.info(f"📋 Protocol MD loaded — {len(protocol_text):,} characters of relevant sections extracted (eligibility, washout, assessments). Gemini will cross-reference this.")
+                        else:
+                            with st.spinner("📄 Reading protocol PDF..."):
+                                protocol_text = GeminiAIService.parse_protocol_pdf(uploaded_protocol)
+                            st.info(f"📄 Protocol PDF loaded — {len(protocol_text):,} characters extracted. Gemini will cross-reference this.")
 
                     # Use Gemini for extraction (with optional protocol context)
                     with st.spinner("🤖 Extracting data with Gemini AI..."):
@@ -424,44 +467,78 @@ with col2:
         st.table(df_results)
         
         st.subheader("Washout Calculator")
-        
+
         # Get protocol-extracted washout periods (from Gemini) if available
-        protocol_washout = data.get("protocol_compliance", {}).get("washout_periods", [])
-        
-        # Check for last_dose data and medications
-        last_dose = data.get("last_dose")
-        medications = data.get("medications", [])
-        
-        if last_dose and last_dose.get("medication") and last_dose.get("date"):
-            ld = last_dose
-            try:
-                # Parse date - handle multiple formats
-                date_str = ld["date"]
+        # Pass None if list is empty so WashoutCalculator treats it as "no protocol"
+        protocol_washout_raw = data.get("protocol_compliance", {}).get("washout_periods", [])
+        protocol_washout = protocol_washout_raw if protocol_washout_raw else None
+
+        last_dose = data.get("last_dose")           # single {medication, date} from transcript
+        medications = data.get("medications", [])   # full list of medications patient is on
+
+        # ── Build a unified list of all medications to display ──────────────────
+        # Start with last_dose (has a date → can compute clearance date)
+        # Then add remaining medications from the medications list
+
+        def _parse_date(date_str: str):
+            """Try common date formats, return datetime or None."""
+            for fmt in ("%Y-%m-%d", "%d %B %Y", "%B %d, %Y", "%d/%m/%Y"):
                 try:
-                    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                    return datetime.strptime(date_str, fmt)
                 except ValueError:
-                    try:
-                        date_obj = datetime.strptime(date_str, "%d %B %Y")
-                    except ValueError:
-                        date_obj = datetime.strptime(date_str, "%B %d, %Y")
-                
-                washout_info = WashoutCalculator.calculate_end_date(ld["medication"], date_obj, protocol_washout)
-                
-                st.info(f"💊 Medication: {washout_info['medication']}")
-                st.info(f"⏱️ Washout Period: {washout_info['washout_days']} days")
-                if washout_info.get("source") == "protocol":
-                    st.success(f"📋 Source: **Protocol Document** (protocol-defined washout)")
-                else:
-                    st.warning(f"📋 Source: **Default/Hardcoded** (no protocol washout data found for this medication)")
-                st.success(f"📅 Earliest Run-In Date: {washout_info['end_date'].strftime('%Y-%m-%d')}")
-            except Exception as e:
-                st.error(f"Error calculating washout: {e}")
-        elif medications:
-            # If we have medications but no last_dose, show a message
-            st.warning(f"⚠️ Medications found: {', '.join(medications)}")
-            st.info("Please ensure the transcript includes the last dose date for washout calculation.")
-        else:
+                    continue
+            return None
+
+        # Dict: med_name → last_dose_date (or None if we don't know the date)
+        med_entries: dict = {}
+
+        if last_dose and last_dose.get("medication"):
+            med_name = last_dose["medication"]
+            date_str  = last_dose.get("date", "")
+            med_entries[med_name] = _parse_date(date_str) if date_str else None
+
+        # Add remaining medications from the medications list (no date known)
+        for med in (medications or []):
+            if med and med not in med_entries:
+                med_entries[med] = None
+
+        if not med_entries:
             st.info("ℹ️ No medication or last dose information found in transcript.")
+        else:
+            if protocol_washout is None:
+                st.warning("⚠️ No protocol uploaded — washout periods below are **hardcoded estimates**, not protocol-defined.")
+
+            for med_name, dose_date in med_entries.items():
+                with st.expander(f"💊 {med_name}", expanded=True):
+                    washout_info = WashoutCalculator.calculate_end_date(med_name, dose_date or datetime.today(), protocol_washout)
+                    source   = washout_info.get("source")
+                    days     = washout_info.get("washout_days")
+                    end_date = washout_info.get("end_date")
+
+                    # Source label
+                    if source == "protocol":
+                        matched_as = washout_info.get("matched_as", "")
+                        alias_note = f" *(matched as: {matched_as})*" if matched_as and "→" in matched_as else ""
+                        st.success(f"📋 Source: **Protocol Document**{alias_note}")
+                    elif source == "not_in_protocol":
+                        st.warning("📋 Source: **Not found in protocol** — no washout required by protocol, or Gemini did not extract it.")
+                    else:
+                        st.warning("📋 Source: **Hardcoded estimate** — upload protocol for accurate value.")
+
+                    # Washout days
+                    if days is not None and days > 0:
+                        st.info(f"⏱️ **Required Washout:** {days} days")
+                    elif days == 0:
+                        st.info("⏱️ **Required Washout:** 0 days (no washout required)")
+
+                    # Clearance date — only if we have the actual last dose date
+                    if dose_date and days is not None:
+                        st.success(f"📅 **Last Dose Date:** {dose_date.strftime('%Y-%m-%d')}")
+                        st.success(f"✅ **Earliest Eligible Date:** {end_date.strftime('%Y-%m-%d')}")
+                    elif dose_date is None and days is not None and days > 0:
+                        st.warning("📅 **Last dose date not found in transcript** — provide date to compute earliest eligible date.")
+                    elif source == "not_in_protocol":
+                        st.info("📅 No clearance date calculated — medication not in protocol washout list.")
 
         st.divider()
         st.header("3. Source Document Generation")
