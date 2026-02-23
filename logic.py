@@ -20,33 +20,96 @@ class WashoutCalculator:
         "Garadacimab": 90
     }
 
+    # Brand name → generic name aliases.
+    # Protocols typically list the generic name; transcripts often use brand names.
+    # This map lets the calculator match either form.
+    BRAND_TO_GENERIC = {
+        "takhzyro": "lanadelumab",
+        "orladeyo": "berotralstat",
+        "cinryze": "plasma-derived c1-inh",
+        "haegarda": "plasma-derived c1-inh",
+        "berinert": "plasma-derived c1-inh",
+        "ruconest": "conestat alfa",
+        "kalbitor": "ecallantide",
+        "firazyr": "icatibant",
+        "sajazir": "icatibant",
+        "garadacimab": "garadacimab",   # same brand/generic
+        "danazol": "danazol",
+        "stanazolol": "stanazolol",
+    }
+
     @staticmethod
-    def get_washout_period(medication_name: str, protocol_washout_periods: list = None) -> int:
-        """Look up washout period. Protocol-extracted periods take priority over hardcoded defaults."""
-        med_lower = (medication_name or "").lower()
-        
-        # First: check protocol-extracted washout periods (from Gemini)
-        if protocol_washout_periods:
+    def _resolve_name(medication_name: str) -> list:
+        """
+        Return a list of name variants to try when matching.
+        Includes the original name AND the generic equivalent (if brand name is known).
+        E.g. 'Takhzyro' → ['takhzyro', 'lanadelumab']
+        """
+        med_lower = (medication_name or "").lower().strip()
+        variants = [med_lower]
+        generic = WashoutCalculator.BRAND_TO_GENERIC.get(med_lower)
+        if generic and generic not in variants:
+            variants.append(generic)
+        return variants
+
+    @staticmethod
+    def get_washout_period(medication_name: str, protocol_washout_periods: list = None) -> Dict[str, Any]:
+        """
+        Look up washout period for a medication.
+
+        Handles brand name ↔ generic name mismatches automatically.
+        E.g. last_dose = 'Takhzyro' but protocol lists 'Lanadelumab' — still matches.
+
+        Returns a dict with:
+          - days (int or None)
+          - source: 'protocol'             → found in uploaded protocol (gold standard)
+                    'no_protocol_estimate' → no protocol uploaded, using hardcoded estimate
+                    'not_in_protocol'      → protocol was uploaded but this med not found in it
+          - matched_as: which name variant got the match (for display)
+        """
+        # Build list of name variants (brand + generic) to try
+        variants = WashoutCalculator._resolve_name(medication_name)
+
+        # CASE 1: Protocol was uploaded — use ONLY protocol-extracted periods
+        if protocol_washout_periods is not None:
             for entry in protocol_washout_periods:
-                proto_med = (entry.get("medication") or "").lower()
+                proto_med = (entry.get("medication") or "").lower().strip()
                 proto_days = entry.get("washout_days", 0)
-                if proto_med and proto_med in med_lower or med_lower in proto_med:
-                    try:
-                        return int(proto_days)
-                    except (ValueError, TypeError):
-                        pass
-        
-        # Fallback: hardcoded defaults
+                if not proto_med:
+                    continue
+                # Try every variant of the input medication name
+                for variant in variants:
+                    if proto_med in variant or variant in proto_med:
+                        try:
+                            return {
+                                "days": int(proto_days),
+                                "source": "protocol",
+                                "matched_as": f"{medication_name} → {proto_med}"
+                            }
+                        except (ValueError, TypeError):
+                            pass
+            # Protocol was provided but this medication was not found in it (under any name)
+            return {"days": None, "source": "not_in_protocol", "matched_as": None}
+
+        # CASE 2: No protocol uploaded — use hardcoded defaults as rough estimate only
         for key, days in WashoutCalculator.DEFAULT_WASHOUT_PERIODS.items():
-            if key.lower() in med_lower:
-                return days
-        return 0
+            for variant in variants:
+                if key.lower() in variant or variant in key.lower():
+                    return {"days": days, "source": "no_protocol_estimate", "matched_as": key}
+
+        return {"days": 0, "source": "no_protocol_estimate", "matched_as": None}
 
     @staticmethod
     def calculate_end_date(medication_name: str, last_dose_date: datetime, protocol_washout_periods: list = None) -> Dict[str, Any]:
-        days = WashoutCalculator.get_washout_period(medication_name, protocol_washout_periods)
-        end_date = add_days(last_dose_date, days)
-        source = "protocol" if protocol_washout_periods else "default"
+        result = WashoutCalculator.get_washout_period(medication_name, protocol_washout_periods)
+        days = result["days"]
+        source = result["source"]
+
+        if days is not None:
+            end_date = add_days(last_dose_date, days)
+        else:
+            end_date = None
+
         return {
             "medication": medication_name,
             "washout_days": days,
