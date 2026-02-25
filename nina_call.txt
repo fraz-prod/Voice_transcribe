@@ -1,0 +1,190 @@
+================================================================================
+        CLINICAL TRIAL SCREENING CALL - NURSE COORDINATOR & PATIENT
+================================================================================
+
+[Call begins]
+
+Nurse Coordinator (Ninna): Hi, this is Ninna calling from the clinical research
+center. Am I speaking with the patient enrolled for the HAE study screening?
+
+Patient: Yes, hi Ninna. That's me.
+
+Ninna: Great, thank you for taking the time today. I'm going to walk you through
+a series of questions to determine your eligibility for this clinical trial.
+Some are inclusion criteria — things we need a "yes" on — and some are exclusion
+criteria — things we need a "no" on. Please answer as honestly as you can. Ready?
+
+Patient: Sure, go ahead.
+
+--------------------------------------------------------------------------------
+                          INCLUSION CRITERIA
+--------------------------------------------------------------------------------
+
+--- 1. Willingness to Consent/Assent ---
+
+Ninna: To participate, you and, if you're under 18, your parent or legal
+guardian, would need to be willing and able to read, understand, and sign a
+consent form. Are you comfortable with that?
+
+Patient: Yes, absolutely. I'm 24, so no guardian needed, and I'm happy to sign
+the consent form.
+
+Ninna: Perfect, thank you. That's a pass on consent.
+
+--- 2. Age ---
+
+Ninna: And just to confirm, you mentioned you're 24 years old — is that correct?
+
+Patient: Yes, that's right. I'm 24.
+
+Ninna: Great, that meets our age requirement. Moving on.
+
+--- 3. HAE Type 1 or 2 Diagnosis ---
+
+Ninna: Do you have a documented diagnosis of Hereditary Angioedema, specifically
+Type 1 or Type 2?
+
+Patient: Yes, I was diagnosed with HAE Type 1 a few years ago. My doctor has
+all the documentation.
+
+Ninna: Wonderful. We'll confirm that with your medical records as well. Next
+question.
+
+--- 4. HAE Attack Frequency ---
+
+Ninna: In the past few months, have you typically experienced at least 2
+Hereditary Angioedema attacks, averaging at least one attack per month?
+
+Patient: Unfortunately, yes. I've been getting about two to three attacks a
+month recently. It's been pretty tough.
+
+Ninna: I'm sorry to hear that. That does meet the frequency criteria for the
+study, though. Hopefully this trial can help.
+
+--- 5. Vaccine Restriction ---
+
+Ninna: During the study, you would need to agree not to receive any vaccines
+within 7 days before or after receiving the study medication. Is that something
+you can commit to?
+
+Patient: Yeah, I don't have any vaccinations coming up, and I can plan around
+that. So yes, I can commit to that.
+
+Ninna: Thank you. Good to know.
+
+--- 6. Contraception (Female) ---
+
+Ninna: This next one is for female participants. For female participants who can
+become pregnant, you must not be pregnant or breastfeeding and must agree to use
+highly effective birth control during the study and for 9 months after your last
+dose. Is this something you can do?
+
+Patient: I'm male, so this one wouldn't apply to me.
+
+Ninna: Correct, that's not applicable for you. We'll mark that accordingly.
+
+--- 7. Contraception (Male) ---
+
+Ninna: For male participants who can produce sperm and have a partner who can
+become pregnant, you must agree to use highly effective birth control during the
+study, unless you are unable to produce sperm or your partner is surgically
+sterile. Is this something you can do?
+
+Patient: Yes, my partner and I can use the required birth control. That's fine.
+
+Ninna: Okay, perfect. Thank you.
+
+--- 8. Sperm Donation Restriction ---
+
+Ninna: You must also agree not to donate or store sperm for 9 months after your
+last dose of study medication. Is this acceptable?
+
+Patient: Yes, that's totally fine with me. No plans for that anyway.
+
+Ninna: Great.
+
+--- 9. Egg Donation/Fertility Treatment Restriction ---
+
+Ninna: You must also agree not to donate or store eggs, or undergo fertility
+treatments for 9 months after your last dose of study medication. Is this
+acceptable?
+
+Patient: That's not applicable to me since I'm male.
+
+Ninna: Right, we'll note that as not applicable. Thank you.
+
+--------------------------------------------------------------------------------
+                          EXCLUSION CRITERIA
+--------------------------------------------------------------------------------
+
+Ninna: Now I'm going to ask a few questions where we need a "no" answer. These
+are things that would prevent participation if present.
+
+--- 10. Previous Navenibart Trial ---
+
+Ninna: Have you ever participated in any other clinical study involving the
+medication called Navenibart?
+
+Patient: No, I haven't. This would be my first time hearing about that
+medication actually.
+
+Ninna: Good, that's what we need. Thank you.
+
+--- 11. Recent Investigational Drug/Device ---
+
+Ninna: Have you used any experimental drugs or medical devices as part of
+another study within the last 90 days?
+
+Patient: No, I haven't been part of any other studies recently.
+
+Ninna: Perfect.
+Ninna: Have you ever received gene editing therapy?
+Patient: No
+Ninna: Have you used Lanadelumab (Takhzyro) for HAE prevention within the last 90 days?
+Patient: No
+Ninna: Have you used Berotralstat (Orladeyo) for HAE prevention within the last 21 days?
+Patient: No
+Ninna: Have you used plasma-derived C1-inhibitor products for HAE prevention within the last 14 days?
+Patient: No
+
+--- 12. Recent Clinical Trial ---
+
+Ninna: And lastly, have you participated in any other clinical research study
+within the last 30 days? Observational studies might be allowed, but we'd need
+to check.
+
+Patient: No, I haven't participated in any studies at all before this one.
+
+Ninna: Excellent. That covers all the screening questions.
+
+--------------------------------------------------------------------------------
+                              SUMMARY
+--------------------------------------------------------------------------------
+
+Ninna: So let me give you a quick summary. Based on your answers today:
+
+  - Consent: PASS — You're willing and able to sign.
+  - Age: PASS — You're 24 years old.
+  - HAE Diagnosis: PASS — Documented HAE Type 1.
+  - Attack Frequency: PASS — 2-3 attacks per month.
+  - Vaccine Restriction: PASS — You agreed to the restriction.
+  - Contraception (Female): PASS — Not applicable.
+  - Contraception (Male): PASS — You agreed.
+  - Sperm Donation Restriction: PASS — You agreed.
+  - Egg Donation Restriction: PASS — Not applicable.
+  - Previous Navenibart Trial: PASS — No prior participation.
+  - Recent Investigational Drug/Device: PASS — None in last 90 days.
+  - Recent Clinical Trial: PASS — None in last 30 days.
+
+Everything looks good on your end! We'll verify the medical documentation and
+get back to you with next steps. Do you have any questions for me?
+
+Patient: No, I think that covers everything. Thank you, Ninna.
+
+Ninna: You're welcome! We'll be in touch soon. Have a great day.
+
+Patient: You too. Bye.
+
+[Call ends]
+
+================================================================================
