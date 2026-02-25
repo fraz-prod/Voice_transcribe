@@ -1404,6 +1404,62 @@ class Chirp3GeminiService:
             raise
 
 
+def _repair_llm_json(text: str) -> str:
+    """
+    Best-effort repair for JSON strings that Gemini generates with common errors:
+      1. Literal newlines / tabs / CRs inside string values  → escape them
+      2. Trailing commas before ] or }                       → remove them
+      3. Unclosed strings                                    → close with "
+      4. Unclosed brackets / braces                         → close them
+    """
+    import re as _re
+
+    # --- Pass 1: escape control characters inside JSON strings ---------------
+    # Walk the text character-by-character, tracking whether we're inside a
+    # JSON string, and escape any raw control char (newline, tab, CR).
+    out = []
+    in_str = False
+    esc_next = False
+    for ch in text:
+        if esc_next:
+            out.append(ch)
+            esc_next = False
+            continue
+        if ch == '\\':
+            out.append(ch)
+            esc_next = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            out.append(ch)
+            continue
+        if in_str:
+            if ch == '\n':   out.append('\\n');  continue
+            if ch == '\r':   out.append('\\r');  continue
+            if ch == '\t':   out.append('\\t');  continue
+        out.append(ch)
+    text = ''.join(out)
+
+    # --- Pass 2: trailing commas before ] or } --------------------------------
+    text = _re.sub(r',\s*([\]}])', r'\1', text)
+
+    # --- Pass 3: close unclosed string ----------------------------------------
+    in_str = esc_next = False
+    for ch in text:
+        if esc_next:   esc_next = False; continue
+        if ch == '\\': esc_next = True;  continue
+        if ch == '"':  in_str = not in_str
+    if in_str:
+        text = text.rstrip() + '"'
+
+    # --- Pass 4: close unclosed brackets / braces ----------------------------
+    text = text.rstrip().rstrip(',')
+    text += ']' * max(text.count('[') - text.count(']'), 0)
+    text += '}' * max(text.count('{') - text.count('}'), 0)
+
+    return text
+
+
 class LiveSessionService:
     """
     Service for real-time I/E categorization during a live pre-screen phone call.
@@ -1483,24 +1539,6 @@ Rules:
 - answer, status, source start as: null, "open", "none"
 - Return ONLY valid JSON — no markdown fences, no explanation
 """
-        import re as _re
-
-        def _repair(text: str) -> str:
-            text = _re.sub(r',\s*([\]}])', r'\1', text)          # trailing commas
-            open_b = text.count('{') - text.count('}')
-            open_k = text.count('[') - text.count(']')
-            # close unclosed string
-            in_s = esc = False
-            for ch in text:
-                if esc:   esc = False; continue
-                if ch == '\\': esc = True; continue
-                if ch == '"':  in_s = not in_s
-            if in_s:
-                text = text.rstrip() + '"'
-            text = text.rstrip().rstrip(',')
-            text += ']' * open_k + '}' * open_b
-            return text
-
         try:
             response = self.model.generate_content(
                 prompt,
@@ -1516,11 +1554,11 @@ Rules:
             start, end = raw.find('{'), raw.rfind('}')
             if start != -1 and end != -1:
                 raw = raw[start:end+1]
-            # Try direct parse first, then repair
+            # Try direct parse, then full repair pipeline
             try:
                 return json.loads(raw)
             except json.JSONDecodeError:
-                return json.loads(_repair(raw))
+                return json.loads(_repair_llm_json(raw))
         except Exception as e:
             print(f"[LiveSessionService] Script generation error: {e}")
             return {}
@@ -1595,26 +1633,11 @@ Rules:
             if start != -1 and end != -1:
                 raw = raw[start:end+1]
 
-            def _repair_json(s: str) -> str:
-                """Best-effort repair for truncated/malformed JSON from Gemini."""
-                import re as _re
-                # Remove trailing commas before ] or }
-                s = _re.sub(r',\s*([\]}])', r'\1', s)
-                # Close any open string by finding the last unclosed "
-                if s.count('"') % 2 != 0:
-                    s = s.rstrip() + '"'
-                # Close open objects/arrays
-                opens   = s.count('{') - s.count('}')
-                s += '}' * max(opens, 0)
-                opens_a = s.count('[') - s.count(']')
-                s += ']' * max(opens_a, 0)
-                return s
-
             try:
                 updates = json.loads(raw)
             except json.JSONDecodeError:
                 try:
-                    updates = json.loads(_repair_json(raw))
+                    updates = json.loads(_repair_llm_json(raw))
                 except json.JSONDecodeError as e2:
                     print(f"[LiveSessionService] JSON repair failed: {e2}")
                     return questions   # Return unchanged on total failure
@@ -1783,12 +1806,17 @@ Rules:
 
     # -- I/E Evaluation -------------------------------------------------------
 
-    def run_ie_check(self, transcript_so_far: str, protocol_text: str) -> dict:
+    def run_ie_check(self, transcript_so_far: str, protocol_text: str,
+                     questions: list = None) -> dict:
         """
         Call Gemini with the lightweight I/E prompt and return the structured status dict.
 
-        Uses the same robust JSON repair pipeline as GeminiAIService.extract_data to
-        handle Gemini occasionally returning trailing commas or unclosed brackets.
+        Args:
+            transcript_so_far: Accumulated transcript text.
+            protocol_text:     Full protocol document text.
+            questions:         Optional list of script question dicts from generate_script_structured().
+                               When provided, Gemini evaluates EXACTLY these criteria (same count
+                               every run) instead of freely extracting its own list from the protocol.
         """
         from live_ie_prompt import LIVE_IE_PROMPT_TEMPLATE
         import re as _re
@@ -1798,8 +1826,31 @@ Rules:
         if len(protocol_text) > MAX_PROTO:
             protocol_text = protocol_text[:MAX_PROTO] + "\n\n[Protocol truncated]"
 
+        # Build the pinned criteria section from the script questions (if available).
+        # This pins the exact criteria list so Gemini can't invent its own count.
+        criteria_section = ""
+        if questions:
+            inc = [q["criterion"] for q in questions if q.get("section") == "inclusion"]
+            exc = [q["criterion"] for q in questions if q.get("section") == "exclusion"]
+            wsh = [q["criterion"] for q in questions if q.get("section") == "washout"]
+            lines = ["=====================",
+                     "CRITERIA TO EVALUATE (use EXACTLY these — do not add or remove any):",
+                     "====================="]
+            if inc:
+                lines.append("INCLUSION:")
+                lines += [f"  - {c}" for c in inc]
+            if exc:
+                lines.append("EXCLUSION:")
+                lines += [f"  - {c}" for c in exc]
+            if wsh:
+                lines.append("WASHOUT medications:")
+                lines += [f"  - {c}" for c in wsh]
+            lines.append("")
+            criteria_section = "\n".join(lines)
+
         prompt = LIVE_IE_PROMPT_TEMPLATE.format(
             protocol_context=protocol_text if protocol_text else "No protocol provided.",
+            criteria_section=criteria_section,
             transcript_so_far=transcript_so_far or "(No transcript yet)"
         )
 
@@ -1893,7 +1944,7 @@ Rules:
                 generation_config={
                     'temperature': 0.2,
                     'top_p': 0.9,
-                    'max_output_tokens': 4096,
+                    'max_output_tokens': 8192,
                     'response_mime_type': 'application/json',
                 }
             )
@@ -1903,7 +1954,7 @@ Rules:
                 print("[LiveSessionService] Empty response, retrying...")
                 response = self.model.generate_content(
                     prompt,
-                    generation_config={'temperature': 0.1, 'max_output_tokens': 4096,
+                    generation_config={'temperature': 0.1, 'max_output_tokens': 8192,
                                        'response_mime_type': 'application/json'}
                 )
                 raw = (response.text or "").strip()

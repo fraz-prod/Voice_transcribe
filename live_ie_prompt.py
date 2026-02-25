@@ -15,6 +15,7 @@ PROTOCOL — INCLUSION / EXCLUSION CRITERIA:
 =====================
 {protocol_context}
 
+{criteria_section}
 =====================
 TRANSCRIPT SO FAR (call is still in progress):
 =====================
@@ -24,7 +25,7 @@ TRANSCRIPT SO FAR (call is still in progress):
 YOUR TASK:
 =====================
 
-Read the transcript so far and determine the current eligibility status for EACH criterion mentioned in the protocol above.
+Read the transcript so far and determine the current eligibility status for EACH criterion listed above.
 
 For each criterion, classify it as:
 - "confirmed_met"    → Patient clearly meets this criterion based on what has been said
@@ -71,7 +72,9 @@ Return ONLY this JSON structure:
 CRITICAL RULES:
 1. Only classify a criterion as "confirmed_met" if the transcript contains CLEAR evidence.
 2. If the criterion was not discussed at all, mark it "open" — do NOT assume.
-3. Be concise in evidence and action_needed — Ninna will read this live during a call.
+3. Be VERY concise — evidence and action_needed MUST be ≤ 15 words. No verbatim quotes.
 4. For washout: if a prohibited medication is mentioned with a date, always flag it and calculate compliance.
-5. Return ONLY valid JSON. No markdown fences.
+5. Return ONLY valid JSON. No markdown fences, no extra text outside the JSON object.
+6. Keep ALL string values SHORT to avoid truncation.
+7. Evaluate ONLY the criteria listed above — do not add extra criteria not in the list.
 """

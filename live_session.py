@@ -82,12 +82,12 @@ def _build_manual_context() -> str:
 def _answer_badge(q: dict) -> str:
     status = q.get("status", "open")
     section = q.get("section", "general")
-    # For exclusion, "confirmed_met" means triggered (bad)
-    if section == "exclusion":
-        if status == "confirmed_met":   return "❌ TRIGGERED"
+    neg = section in ("exclusion", "washout")  # inverted: confirmed_met = triggered (bad)
+    if neg:
+        if status == "confirmed_met":    return "❌ TRIGGERED"
         if status == "confirmed_failed": return "✅ Clear"
     else:
-        if status == "confirmed_met":   return "✅ PASS"
+        if status == "confirmed_met":    return "✅ PASS"
         if status == "confirmed_failed": return "❌ FAIL"
     if status == "needs_clarification": return "⚠️ Clarify"
     return "⚪ Open"
@@ -96,10 +96,11 @@ def _answer_badge(q: dict) -> str:
 def _status_color(q: dict) -> str:
     status  = q.get("status", "open")
     section = q.get("section", "general")
+    neg = section in ("exclusion", "washout")
     if status == "confirmed_met":
-        return "error" if section == "exclusion" else "success"
+        return "error" if neg else "success"
     if status == "confirmed_failed":
-        return "success" if section == "exclusion" else "error"
+        return "success" if neg else "error"
     if status == "needs_clarification":
         return "warning"
     return "info"
@@ -275,18 +276,21 @@ def _render_script_tab(api_key: str, protocol_text: str):
                 st.session_state.manual_overrides[qid] = new_val
 
             # Status indicator
-            if status == "confirmed_met" and section != "exclusion":
+            # For exclusion + washout: confirmed_met = BAD (triggered), confirmed_failed = GOOD (clear)
+            # For inclusion: confirmed_met = GOOD (pass), confirmed_failed = BAD (fail)
+            neg = section in ("exclusion", "washout")
+            if status == "confirmed_met" and not neg:
                 st.success("✅ PASS — criterion confirmed")
-            elif status == "confirmed_met" and section == "exclusion":
-                st.error("❌ Exclusion criterion TRIGGERED")
-            elif status == "confirmed_failed" and section == "exclusion":
-                st.success("✅ Clear — exclusion not triggered")
+            elif status == "confirmed_met" and neg:
+                st.error("❌ Exclusion / Washout TRIGGERED")
+            elif status == "confirmed_failed" and neg:
+                st.success("✅ Clear — not triggered")
             elif status == "confirmed_failed":
                 st.error("❌ FAIL — patient does not meet this criterion")
             elif status == "needs_clarification":
                 st.warning("⚠️ Needs clarification — follow up required")
             else:
-                st.info("⚪ Not yet captured — record more of the call or type above")
+                st.info("⚪ Not yet captured — record more or type above")
 
     # ── Free-text notes ────────────────────────────────────────────────────────
     st.divider()
@@ -457,8 +461,13 @@ def _render_recorded_tab(api_key: str, protocol_text: str, whisper_model=None):
                     st.session_state.manual_overrides = {}
 
             # Step 3 — I/E check (primary source of truth)
+            # Pass the script questions so Gemini evaluates EXACTLY those criteria.
+            _q_for_ie = (st.session_state.script_data or {}).get("questions", []) or []
             with st.spinner("🤖 Running I/E analysis…"):
-                ie = svc.run_ie_check(st.session_state.rec_transcript, protocol_text or "")
+                ie = svc.run_ie_check(
+                    st.session_state.rec_transcript, protocol_text or "",
+                    questions=_q_for_ie or None
+                )
                 st.session_state.rec_ie_status = ie
 
             # Step 4 — Fill script cards via BOTH methods (belt + suspenders)
@@ -573,11 +582,12 @@ def _render_recorded_tab(api_key: str, protocol_text: str, whisper_model=None):
                                     placeholder="Type answer if missed in recording…")
                 if nv != cur:
                     st.session_state.rec_manual_overrides[qid] = nv
-                if status == "confirmed_met" and section != "exclusion":
+                neg = section in ("exclusion", "washout")
+                if status == "confirmed_met" and not neg:
                     st.success("✅ PASS")
-                elif status == "confirmed_met":
-                    st.error("❌ Exclusion TRIGGERED")
-                elif status == "confirmed_failed" and section == "exclusion":
+                elif status == "confirmed_met" and neg:
+                    st.error("❌ Exclusion / Washout TRIGGERED")
+                elif status == "confirmed_failed" and neg:
                     st.success("✅ Clear")
                 elif status == "confirmed_failed":
                     st.error("❌ FAIL")
@@ -679,7 +689,9 @@ def render(api_key: str, protocol_text: str, whisper_model=None):
                             combined += f"\n\n[MANUAL NOTES]: {manual_ctx}"
                         with st.spinner("🤖 Updating I/E checklist…"):
                             svc = LiveSessionService(api_key)
-                            ie = svc.run_ie_check(combined, protocol_text)
+                            _qs = data.get("questions", [])
+                            ie = svc.run_ie_check(combined, protocol_text,
+                                                  questions=_qs or None)
                             st.session_state.ie_status = ie
                             # Sync I/E results → script cards
                             data = dict(st.session_state.script_data or {})
@@ -707,12 +719,13 @@ def render(api_key: str, protocol_text: str, whisper_model=None):
                             combined += f"\n\n[MANUAL NOTES]: {manual_ctx}"
                         with st.spinner("🤖 Running I/E check…"):
                             svc = LiveSessionService(api_key)
-                            ie  = svc.run_ie_check(combined, protocol_text)
-                            st.session_state.ie_status = ie
                             data = dict(st.session_state.script_data or {})
-                            questions = data.get("questions", [])
-                            if questions:
-                                synced = LiveSessionService.sync_ie_to_script(questions, ie)
+                            _qs = data.get("questions", [])
+                            ie  = svc.run_ie_check(combined, protocol_text,
+                                                   questions=_qs or None)
+                            st.session_state.ie_status = ie
+                            if _qs:
+                                synced = LiveSessionService.sync_ie_to_script(_qs, ie)
                                 data["questions"] = synced
                                 st.session_state.script_data = data
                             st.session_state.last_ie_chunk = st.session_state.chunk_count
